@@ -472,15 +472,22 @@ Important:
 - You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.
 - Continue the conversation if the user's idea is underspecified.
 - Call generate_image only when the user is ready to create or edit an image.
-- UI settings are chosen by the user. Keep size, resolution, quality, and count exactly as CURRENT SETTINGS unless the user explicitly asks for different settings or your recommendation is important. Any difference requires user confirmation in the UI.
+- CURRENT SETTINGS are a reference baseline, not a hard rule. You may keep them or deliberately adjust them when the user's creative goal implies a better setup, such as changing landscape to portrait, increasing quality, or changing count.
+- When calling generate_image, you must fill every tool argument: prompt, size, resolution, quality, count, and assistant_message. If you keep a current setting, repeat its value explicitly.
+- If your tool arguments differ from CURRENT SETTINGS, the UI will ask the user to confirm before generating.
 - Write the generation prompt clearly and completely. The user will see it.
 - Keep assistant_message concise and natural.`
 }
 
 func userPlanningPrompt(input PlanInput) string {
 	var b strings.Builder
-	b.WriteString("CURRENT SETTINGS:\n")
+	b.WriteString("CURRENT SETTINGS (reference baseline; you may adjust if the request benefits from it):\n")
 	b.WriteString(fmt.Sprintf("- size: %s\n- resolution: %s\n- quality: %s\n- count: %d\n", input.Size, input.Resolution, input.Quality, input.Count))
+	b.WriteString("AVAILABLE TOOL PARAMETER VALUES:\n")
+	b.WriteString("- size: auto, 1:1, 1:2, 2:1, 1:3, 3:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 9:21, 21:9, or explicit pixels like 1024x1024\n")
+	b.WriteString("- resolution: 1K, 2K, 4K\n")
+	b.WriteString("- quality: low, medium, high\n")
+	b.WriteString("- count: integer 1 to 4\n")
 	if len(input.ImageNames) > 0 {
 		b.WriteString("REFERENCE IMAGES:\n")
 		for i, name := range input.ImageNames {
@@ -500,7 +507,7 @@ func generateImageTool() toolDef {
 			Description: "Create or edit an image with GPT Image 2. Call this only when the user is ready to generate.",
 			Parameters: map[string]any{
 				"type":     "object",
-				"required": []string{"prompt"},
+				"required": []string{"prompt", "size", "resolution", "quality", "count", "assistant_message"},
 				"properties": map[string]any{
 					"prompt": map[string]any{
 						"type":        "string",
@@ -508,27 +515,27 @@ func generateImageTool() toolDef {
 					},
 					"size": map[string]any{
 						"type":        "string",
-						"description": "Recommended size ratio or auto. Keep current UI setting unless change is necessary.",
+						"description": "Selected output size. Use current setting as a reference, but choose the best value for the request. Allowed ratios: auto, 1:1, 1:2, 2:1, 1:3, 3:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 9:21, 21:9. Explicit pixels like 1024x1024 are also allowed.",
 					},
 					"resolution": map[string]any{
 						"type":        "string",
 						"enum":        []string{"1K", "2K", "4K"},
-						"description": "Recommended resolution. Keep current UI setting unless change is necessary.",
+						"description": "Selected resolution tier. Use current setting as a reference, but choose the best value for the request.",
 					},
 					"quality": map[string]any{
 						"type":        "string",
 						"enum":        []string{"low", "medium", "high"},
-						"description": "Recommended quality. Keep current UI setting unless change is necessary.",
+						"description": "Selected quality. Use current setting as a reference. Choose high when fidelity matters, low for cheap drafts, medium for normal output.",
 					},
 					"count": map[string]any{
 						"type":        "integer",
 						"minimum":     1,
 						"maximum":     4,
-						"description": "Number of outputs. Keep current UI setting unless change is necessary.",
+						"description": "Selected number of outputs from 1 to 4. Use current setting as a reference, but adjust if variety is useful.",
 					},
 					"assistant_message": map[string]any{
 						"type":        "string",
-						"description": "Brief message shown to the user before/with the generated prompt.",
+						"description": "Brief message shown to the user before/with the generated prompt. Mention notable parameter changes naturally if you made any.",
 					},
 				},
 			},
