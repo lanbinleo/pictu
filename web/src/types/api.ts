@@ -109,3 +109,10 @@ export type GenerateResponse = {
   requires_confirmation?: boolean
   setting_changes?: SettingChange[]
 }
+
+export type StreamEvent =
+  | { type: 'content'; text: string }
+  | { type: 'thinking'; text: string }
+  | ({ type: 'confirm' } & GenerateResponse)
+  | ({ type: 'done' } & GenerateResponse)
+  | { type: 'error'; error: string }

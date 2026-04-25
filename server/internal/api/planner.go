@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -63,6 +64,7 @@ type chatRequest struct {
 	Tools       []toolDef     `json:"tools,omitempty"`
 	ToolChoice  string        `json:"tool_choice,omitempty"`
 	Temperature float64       `json:"temperature,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
 }
 
 type toolDef struct {
@@ -80,6 +82,11 @@ type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
 	} `json:"choices"`
+}
+
+type PlanStreamEvent struct {
+	Type string
+	Text string
 }
 
 func NewPlanner(cfg config.LLMConfig) *Planner {
@@ -123,46 +130,42 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 		return BuildPlan(input), nil
 	}
 	msg := out.Choices[0].Message
-	plan := GenerationPlan{
-		AssistantMessage: strings.TrimSpace(msg.Content),
-		Size:             input.Size,
-		Resolution:       input.Resolution,
-		Quality:          input.Quality,
-		Count:            input.Count,
-	}
-	for _, call := range msg.ToolCalls {
-		if call.Function.Name != "generate_image" {
-			continue
+	return planFromMessage(msg, input), nil
+}
+
+func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(PlanStreamEvent) error) (GenerationPlan, error) {
+	input = normalizeInput(input)
+	if p.cfg.Provider != "openai_compatible" || p.cfg.APIKey == "" || p.cfg.BaseURL == "" || p.cfg.PlannerModel == "" {
+		plan := BuildPlan(input)
+		if plan.AssistantMessage != "" {
+			_ = emit(PlanStreamEvent{Type: "content", Text: plan.AssistantMessage})
 		}
-		var args struct {
-			Prompt           string `json:"prompt"`
-			Size             string `json:"size"`
-			Resolution       string `json:"resolution"`
-			Quality          string `json:"quality"`
-			Count            int    `json:"count"`
-			AssistantMessage string `json:"assistant_message"`
-		}
-		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
-			continue
-		}
-		plan.ToolCalled = true
-		plan.Prompt = strings.TrimSpace(args.Prompt)
-		plan.Size = coalesce(args.Size, input.Size)
-		plan.Resolution = coalesce(args.Resolution, input.Resolution)
-		plan.Quality = coalesce(args.Quality, input.Quality)
-		if args.Count > 0 {
-			plan.Count = args.Count
-		}
-		if args.AssistantMessage != "" {
-			plan.AssistantMessage = args.AssistantMessage
-		}
-		break
-	}
-	if !plan.ToolCalled {
-		plan.AssistantMessage = coalesce(plan.AssistantMessage, "我先理解你的方向。你可以继续补充主体、风格、用途或参考图关系。")
 		return plan, nil
 	}
-	return sanitizePlan(plan, input), nil
+
+	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt()}}
+	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
+		content := msg.Content
+		if msg.Prompt != "" {
+			content += "\nPrevious generated prompt:\n" + msg.Prompt
+		}
+		messages = append(messages, chatMessage{Role: msg.Role, Content: content})
+	}
+	messages = append(messages, chatMessage{Role: "user", Content: userPlanningPrompt(input)})
+
+	reqBody := chatRequest{
+		Model:       p.cfg.PlannerModel,
+		Messages:    messages,
+		Tools:       []toolDef{generateImageTool()},
+		ToolChoice:  "auto",
+		Temperature: 0.4,
+		Stream:      true,
+	}
+	msg, err := p.doChatStream(ctx, reqBody, emit)
+	if err != nil {
+		return p.Plan(ctx, input)
+	}
+	return planFromMessage(msg, input), nil
 }
 
 func (p *Planner) Title(ctx context.Context, userText, assistantText string, date time.Time) (string, error) {
@@ -171,8 +174,8 @@ func (p *Planner) Title(ctx context.Context, userText, assistantText string, dat
 		return fallback, nil
 	}
 	messages := []chatMessage{
-		{Role: "system", Content: "为绘画会话生成一个简短中文标题。必须包含当前日期，日期格式 YYYY-MM-DD。不要包含具体时间。总长度不超过 28 个汉字。只输出标题。"},
-		{Role: "user", Content: fmt.Sprintf("当前日期：%s\n用户：%s\n助手：%s", date.Format("2006-01-02"), userText, assistantText)},
+		{Role: "system", Content: "为绘画会话生成一个简短中文标题。不要包含日期，不要包含具体时间。总长度不超过 18 个汉字。只输出标题。"},
+		{Role: "user", Content: fmt.Sprintf("用户：%s\n助手：%s", userText, assistantText)},
 	}
 	var out chatResponse
 	if err := p.doChat(ctx, chatRequest{Model: p.cfg.TitleModel, Messages: messages, Temperature: 0.2}, &out); err != nil {
@@ -220,6 +223,158 @@ func (p *Planner) doChat(ctx context.Context, reqBody chatRequest, out any) erro
 	return json.Unmarshal(body, out)
 }
 
+func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit func(PlanStreamEvent) error) (chatMessage, error) {
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return chatMessage{}, err
+	}
+	base := strings.TrimRight(p.cfg.BaseURL, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/chat/completions", bytes.NewReader(data))
+	if err != nil {
+		return chatMessage{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return chatMessage{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return chatMessage{}, fmt.Errorf("llm stream error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var message chatMessage
+	toolByIndex := map[int]*toolCall{}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					Reasoning        string `json:"reasoning"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.ReasoningContent != "" {
+				if err := emit(PlanStreamEvent{Type: "thinking", Text: choice.Delta.ReasoningContent}); err != nil {
+					return message, err
+				}
+			}
+			if choice.Delta.Reasoning != "" {
+				if err := emit(PlanStreamEvent{Type: "thinking", Text: choice.Delta.Reasoning}); err != nil {
+					return message, err
+				}
+			}
+			if choice.Delta.Content != "" {
+				message.Content += choice.Delta.Content
+				if err := emit(PlanStreamEvent{Type: "content", Text: choice.Delta.Content}); err != nil {
+					return message, err
+				}
+			}
+			for _, deltaCall := range choice.Delta.ToolCalls {
+				call := toolByIndex[deltaCall.Index]
+				if call == nil {
+					call = &toolCall{Type: "function"}
+					toolByIndex[deltaCall.Index] = call
+				}
+				if deltaCall.ID != "" {
+					call.ID = deltaCall.ID
+				}
+				if deltaCall.Type != "" {
+					call.Type = deltaCall.Type
+				}
+				if deltaCall.Function.Name != "" {
+					call.Function.Name += deltaCall.Function.Name
+				}
+				if deltaCall.Function.Arguments != "" {
+					call.Function.Arguments += deltaCall.Function.Arguments
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return message, err
+	}
+	for i := 0; i < len(toolByIndex); i++ {
+		if call := toolByIndex[i]; call != nil {
+			message.ToolCalls = append(message.ToolCalls, *call)
+		}
+	}
+	return message, nil
+}
+
+func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
+	plan := GenerationPlan{
+		AssistantMessage: strings.TrimSpace(msg.Content),
+		Size:             input.Size,
+		Resolution:       input.Resolution,
+		Quality:          input.Quality,
+		Count:            input.Count,
+	}
+	for _, call := range msg.ToolCalls {
+		if call.Function.Name != "generate_image" {
+			continue
+		}
+		var args struct {
+			Prompt           string `json:"prompt"`
+			Size             string `json:"size"`
+			Resolution       string `json:"resolution"`
+			Quality          string `json:"quality"`
+			Count            int    `json:"count"`
+			AssistantMessage string `json:"assistant_message"`
+		}
+		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+			continue
+		}
+		plan.ToolCalled = true
+		plan.Prompt = strings.TrimSpace(args.Prompt)
+		plan.Size = coalesce(args.Size, input.Size)
+		plan.Resolution = coalesce(args.Resolution, input.Resolution)
+		plan.Quality = coalesce(args.Quality, input.Quality)
+		if args.Count > 0 {
+			plan.Count = args.Count
+		}
+		if args.AssistantMessage != "" {
+			plan.AssistantMessage = args.AssistantMessage
+		}
+		break
+	}
+	if !plan.ToolCalled {
+		plan.AssistantMessage = coalesce(plan.AssistantMessage, "我先理解你的方向。你可以继续补充主体、风格、用途或参考图关系。")
+		return plan
+	}
+	return sanitizePlan(plan, input)
+}
+
 func BuildPlan(input PlanInput) GenerationPlan {
 	input = normalizeInput(input)
 	var b strings.Builder
@@ -264,13 +419,13 @@ func EstimateCost(baseCost, inputCost int, lowMultiplier, highMultiplier float64
 func TitleFromPrompt(text string, date time.Time) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		return date.Format("2006-01-02") + " 图像会话"
+		return "图像会话"
 	}
 	runes := []rune(trimmed)
 	if len(runes) > 16 {
 		trimmed = string(runes[:16])
 	}
-	return fmt.Sprintf("%s %s", date.Format("2006-01-02"), trimmed)
+	return trimmed
 }
 
 func normalizeInput(input PlanInput) PlanInput {

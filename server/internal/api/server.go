@@ -64,6 +64,7 @@ func (s *Server) routes() *gin.Engine {
 	protected.PUT("/sessions/:id", s.updateSession)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
 	protected.POST("/sessions/:id/generate", s.generate)
+	protected.POST("/sessions/:id/generate/stream", s.generateStream)
 	protected.GET("/tasks/:id", s.getTask)
 	protected.GET("/usage", s.usage)
 
@@ -293,6 +294,14 @@ func (s *Server) generate(c *gin.Context) {
 		}
 	}
 	if !plan.ToolCalled {
+		if err := s.store.ReserveCredits(c, user, 1, "llm_reply", ""); err != nil {
+			if errors.Is(err, store.ErrInsufficientCredits) {
+				fail(c, http.StatusPaymentRequired, "not enough credits")
+				return
+			}
+			fail(c, http.StatusInternalServerError, err.Error())
+			return
+		}
 		_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
 		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
 		s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
@@ -341,6 +350,117 @@ func (s *Server) generate(c *gin.Context) {
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 	go s.pollTask(task.ID)
 	c.JSON(http.StatusOK, gin.H{"plan": plan, "task": localTask, "message": msg, "generated": true})
+}
+
+func (s *Server) generateStream(c *gin.Context) {
+	sessionID, ok := pathID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Message    string  `json:"message" binding:"required"`
+		AssetIDs   []int64 `json:"asset_ids"`
+		Size       string  `json:"size"`
+		Resolution string  `json:"resolution"`
+		Quality    string  `json:"quality"`
+		Count      int     `json:"count"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	user := currentUser(c)
+	assets, err := s.assetsByID(c, user, req.AssetIDs)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	var imageURLs []string
+	var imageNames []string
+	for i, asset := range assets {
+		imageURLs = append(imageURLs, asset.URL)
+		imageNames = append(imageNames, fmt.Sprintf("image %d (%s)", i+1, asset.FileName))
+	}
+	contextMessages, err := s.store.ListMessages(c, user, sessionID)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	input := PlanInput{
+		UserText:        req.Message,
+		ImageNames:      imageNames,
+		Size:            req.Size,
+		Resolution:      req.Resolution,
+		Quality:         req.Quality,
+		Count:           req.Count,
+		ContextMessages: contextMessages,
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	flush := func(event string, payload any) error {
+		data, _ := json.Marshal(payload)
+		if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", event, data); err != nil {
+			return err
+		}
+		c.Writer.Flush()
+		return nil
+	}
+
+	plan, err := s.planner.PlanStream(c.Request.Context(), input, func(ev PlanStreamEvent) error {
+		return flush(ev.Type, gin.H{"text": ev.Text})
+	})
+	if err != nil {
+		_ = flush("error", gin.H{"error": err.Error()})
+		return
+	}
+	if !plan.ToolCalled {
+		if err := s.store.ReserveCredits(c, user, 1, "llm_reply", ""); err != nil {
+			_ = flush("error", gin.H{"error": err.Error()})
+			return
+		}
+		_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
+		s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
+		_ = flush("done", gin.H{"plan": plan, "message": msg, "generated": false})
+		return
+	}
+	changes := settingChanges(input, plan)
+	if len(changes) > 0 {
+		_ = flush("confirm", gin.H{"requires_confirmation": true, "plan": plan, "setting_changes": changes})
+		return
+	}
+	cost := EstimateCost(s.cfg.Billing.ImageBaseCost, s.cfg.Billing.ImageInputCost, s.cfg.Billing.LowQualityMultiplier, s.cfg.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
+	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
+		_ = flush("error", gin.H{"error": err.Error()})
+		return
+	}
+	_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+	evReq := evolink.ImageRequest{
+		Prompt:     plan.Prompt,
+		ImageURLs:  imageURLs,
+		Size:       plan.Size,
+		Resolution: plan.Resolution,
+		Quality:    plan.Quality,
+		N:          plan.Count,
+	}
+	task, err := s.evolink.CreateImage(c, evReq)
+	if err != nil {
+		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
+		_ = flush("error", gin.H{"error": err.Error()})
+		return
+	}
+	reqJSON, _ := json.Marshal(evReq)
+	localTask, err := s.store.CreateTask(c, user, sessionID, task.ID, task.Status, task.Progress, cost, plan.Prompt, string(reqJSON))
+	if err != nil {
+		_ = flush("error", gin.H{"error": err.Error()})
+		return
+	}
+	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
+	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
+	go s.pollTask(task.ID)
+	_ = flush("done", gin.H{"plan": plan, "task": localTask, "message": msg, "generated": true})
 }
 
 func (s *Server) getTask(c *gin.Context) {

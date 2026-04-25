@@ -380,6 +380,45 @@ select:focus {
   margin: 0;
 }
 
+.markdown-body {
+  display: grid;
+  gap: 8px;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre {
+  margin: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 20px;
+}
+
+.markdown-body code {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 1px 5px;
+  font-size: 0.9em;
+}
+
+.markdown-body pre {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 10px;
+}
+
+.streaming-message {
+  margin: 0 16px 12px;
+  align-self: flex-start;
+}
+
 .message.user {
   align-self: flex-end;
   color: #faf9f5;
@@ -456,6 +495,13 @@ pre {
   width: 100%;
   display: block;
   object-fit: cover;
+}
+
+.result-grid button {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: transparent;
+  padding: 5px;
 }
 
 .result-grid img {
@@ -566,6 +612,41 @@ pre {
   place-items: center;
   background: rgba(20, 20, 19, 0.38);
   padding: 18px;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: rgba(20, 20, 19, 0.62);
+  padding: 18px;
+}
+
+.lightbox-frame {
+  position: relative;
+  max-width: min(960px, 96vw);
+  max-height: 92vh;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  padding: 12px;
+}
+
+.lightbox-frame .icon-button {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 1;
+}
+
+.lightbox-frame img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 24px);
+  border-radius: 10px;
+  object-fit: contain;
 }
 
 .overlay-panel {

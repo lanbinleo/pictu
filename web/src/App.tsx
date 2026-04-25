@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import {
   Check,
   ImagePlus,
@@ -133,6 +134,8 @@ function Workspace() {
   const [mobilePanel, setMobilePanel] = useState(false)
   const [overlay, setOverlay] = useState<Overlay>(null)
   const [error, setError] = useState('')
+  const [streamingText, setStreamingText] = useState('')
+  const [thinkingText, setThinkingText] = useState('')
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -147,6 +150,14 @@ function Workspace() {
     if (!id) return
     const next = await api.getSession(id)
     setDetail(next)
+  }
+
+  async function refreshWorkspace() {
+    await Promise.all([
+      refreshDetail().catch(() => undefined),
+      refreshSessions().catch(() => undefined),
+      api.me().then((res) => setUser(res.user)).catch(() => undefined),
+    ])
   }
 
   async function createSession() {
@@ -251,8 +262,14 @@ function Workspace() {
           </button>
         </header>
         {error && <p className="inline-error">{error}</p>}
-        <MessageStream messages={messages} tasks={tasks} />
-        <Composer sessionId={activeSessionId} assets={assets} onChanged={() => refreshDetail()} />
+        <MessageStream messages={messages} tasks={tasks} streamingText={streamingText} thinkingText={thinkingText} />
+        <Composer
+          sessionId={activeSessionId}
+          assets={assets}
+          onChanged={refreshWorkspace}
+          setStreamingText={setStreamingText}
+          setThinkingText={setThinkingText}
+        />
       </section>
 
       <aside className="asset-panel">
@@ -304,11 +321,22 @@ function EditableTitle({ title, onSave }: { title: string; onSave: (title: strin
   )
 }
 
-function MessageStream({ messages, tasks }: { messages: Message[]; tasks: Task[] }) {
+function MessageStream({
+  messages,
+  tasks,
+  streamingText,
+  thinkingText,
+}: {
+  messages: Message[]
+  tasks: Task[]
+  streamingText: string
+  thinkingText: string
+}) {
   const bottomRef = useRef<HTMLDivElement | null>(null)
+  const [preview, setPreview] = useState<string | null>(null)
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, tasks.length])
+  }, [messages.length, tasks.length, streamingText, thinkingText])
 
   const latestTask = tasks[0]
   const resultImages = useMemo(() => extractImages(latestTask), [latestTask?.result_json])
@@ -323,7 +351,7 @@ function MessageStream({ messages, tasks }: { messages: Message[]; tasks: Task[]
       )}
       {messages.map((msg) => (
         <article className={`message ${msg.role}`} key={msg.id}>
-          <p>{msg.content}</p>
+          <MarkdownText text={msg.content} />
           {msg.prompt && (
             <details>
               <summary>Prompt</summary>
@@ -345,20 +373,44 @@ function MessageStream({ messages, tasks }: { messages: Message[]; tasks: Task[]
           {resultImages.length > 0 && (
             <div className="result-grid">
               {resultImages.map((url) => (
-                <a key={url} href={url} target="_blank" rel="noreferrer">
+                <button key={url} onClick={() => setPreview(url)} title="预览图片">
                   <img src={url} alt="Generated result" />
-                </a>
+                </button>
               ))}
             </div>
           )}
         </article>
       )}
+      {(thinkingText || streamingText) && (
+        <article className="message assistant streaming-message">
+          {thinkingText && (
+            <details>
+              <summary>Thinking</summary>
+              <pre>{thinkingText}</pre>
+            </details>
+          )}
+          {streamingText && <MarkdownText text={streamingText} />}
+        </article>
+      )}
       <div ref={bottomRef} />
+      {preview && <ImageLightbox src={preview} onClose={() => setPreview(null)} />}
     </div>
   )
 }
 
-function Composer({ sessionId, assets, onChanged }: { sessionId: number | null; assets: Asset[]; onChanged: () => void }) {
+function Composer({
+  sessionId,
+  assets,
+  onChanged,
+  setStreamingText,
+  setThinkingText,
+}: {
+  sessionId: number | null
+  assets: Asset[]
+  onChanged: () => void
+  setStreamingText: React.Dispatch<React.SetStateAction<string>>
+  setThinkingText: React.Dispatch<React.SetStateAction<string>>
+}) {
   const draft = useAppStore((s) => s.draft)
   const setDraft = useAppStore((s) => s.setDraft)
   const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
@@ -406,7 +458,48 @@ function Composer({ sessionId, assets, onChanged }: { sessionId: number | null; 
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    await requestGenerate()
+    if (!sessionId || !draft.trim()) return
+    setBusy(true)
+    setError('')
+    setStreamingText('')
+    setThinkingText('')
+    try {
+      await api.generateStream(
+        sessionId,
+        {
+          message: draft,
+          asset_ids: selectedAssetIds,
+          ...settings,
+        },
+        (event) => {
+          if (event.type === 'content') {
+            setStreamingText((text) => text + event.text)
+          } else if (event.type === 'thinking') {
+            setThinkingText((text) => text + event.text)
+          } else if (event.type === 'confirm') {
+            setPending(event)
+            setModalSettings({
+              size: event.plan.size,
+              resolution: event.plan.resolution,
+              quality: event.plan.quality,
+              count: event.plan.count,
+            })
+          } else if (event.type === 'done') {
+            setDraft('')
+            clearSelectedAssets()
+            onChanged()
+          } else if (event.type === 'error') {
+            setError(event.error)
+          }
+        },
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成失败')
+    } finally {
+      setBusy(false)
+      setStreamingText('')
+      setThinkingText('')
+    }
   }
 
   async function confirmWith(nextSettings: typeof settings, persist: boolean) {
@@ -462,6 +555,27 @@ function Composer({ sessionId, assets, onChanged }: { sessionId: number | null; 
         />
       )}
     </>
+  )
+}
+
+function MarkdownText({ text }: { text: string }) {
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown>{text}</ReactMarkdown>
+    </div>
+  )
+}
+
+function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  return (
+    <div className="lightbox" onClick={onClose}>
+      <div className="lightbox-frame" onClick={(event) => event.stopPropagation()}>
+        <button className="icon-button" onClick={onClose} title="关闭">
+          <X size={18} />
+        </button>
+        <img src={src} alt="Preview" />
+      </div>
+    </div>
   )
 }
 
@@ -653,6 +767,7 @@ function GenerationSettings() {
 function UserCenter({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<UsageResponse | null>(null)
   const [error, setError] = useState('')
+  const [preview, setPreview] = useState<string | null>(null)
 
   useEffect(() => {
     api.usage().then(setData).catch((err) => setError(err.message))
@@ -685,9 +800,9 @@ function UserCenter({ onClose }: { onClose: () => void }) {
             <h3>参考图</h3>
             <div className="asset-grid library">
               {(data.assets ?? []).map((asset) => (
-                <a key={asset.id} href={asset.url} target="_blank" rel="noreferrer" title={asset.file_name}>
+                <button key={asset.id} onClick={() => setPreview(asset.url)} title={asset.file_name}>
                   <img src={asset.url} alt={asset.file_name} />
-                </a>
+                </button>
               ))}
             </div>
           </section>
@@ -695,6 +810,7 @@ function UserCenter({ onClose }: { onClose: () => void }) {
       ) : (
         <Loader2 className="spin" size={20} />
       )}
+      {preview && <ImageLightbox src={preview} onClose={() => setPreview(null)} />}
     </Overlay>
   )
 }
