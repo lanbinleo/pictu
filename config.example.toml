@@ -1,0 +1,32 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+frontend_dist = "web/dist"
+jwt_secret = "change-me-before-production"
+
+[database]
+path = "pictu.db"
+
+[billing]
+signup_credits = 20
+image_base_cost = 2
+image_input_cost = 1
+high_quality_multiplier = 4
+low_quality_multiplier = 0.25
+
+[evolink]
+api_key = "YOUR_EVOLINK_API_KEY"
+base_url = "https://api.evolink.ai"
+files_base_url = "https://files-api.evolink.ai"
+model = "gpt-image-2"
+poll_interval_seconds = 3
+poll_timeout_seconds = 180
+
+[llm]
+# Reserved for a ChatGPT-compatible planner. The first version ships with a
+# deterministic planner so the product works without sending chat text to a
+# model that cannot see images.
+provider = "builtin"
+base_url = ""
+api_key = ""
+model = ""

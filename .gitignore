@@ -1,0 +1,19 @@
+# Local config and data
+config.toml
+*.db
+*.db-*
+
+# Frontend
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+
+# Backend build artifacts
+server/pictu
+server/pictu.exe
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
