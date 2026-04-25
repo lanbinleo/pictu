@@ -35,9 +35,10 @@ export const api = {
   updateSession: (id: number, title: string) =>
     request<{ session: Session }>(`/api/sessions/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
   getSession: (id: number) => request<SessionDetail>(`/api/sessions/${id}`),
-  uploadAsset: (sessionId: number, file: File) => {
+  uploadAsset: (sessionId: number, file: File, provider?: string) => {
     const data = new FormData()
     data.append('file', file)
+    if (provider) data.append('provider', provider)
     return request<{ asset: Asset }>(`/api/sessions/${sessionId}/assets`, { method: 'POST', body: data })
   },
   generate: (

@@ -15,6 +15,7 @@ type AppState = {
     count: number
   }
   theme: 'light' | 'dark'
+  uploadProvider: string
   setAuth: (token: string, user: User) => void
   clearAuth: () => void
   setUser: (user: User) => void
@@ -24,6 +25,7 @@ type AppState = {
   clearSelectedAssets: () => void
   setSettings: (settings: Partial<AppState['settings']>) => void
   toggleTheme: () => void
+  setUploadProvider: (provider: string) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -41,6 +43,7 @@ export const useAppStore = create<AppState>()(
         count: 1,
       },
       theme: 'light',
+      uploadProvider: 'evolink',
       setAuth: (token, user) => set({ token, user }),
       clearAuth: () => set({ token: '', user: null, activeSessionId: null, selectedAssetIds: [] }),
       setUser: (user) => set({ user }),
@@ -55,6 +58,7 @@ export const useAppStore = create<AppState>()(
       clearSelectedAssets: () => set({ selectedAssetIds: [] }),
       setSettings: (settings) => set((state) => ({ settings: { ...state.settings, ...settings } })),
       toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+      setUploadProvider: (provider) => set({ uploadProvider: provider }),
     }),
     {
       name: 'pictu-app-state',
@@ -65,6 +69,7 @@ export const useAppStore = create<AppState>()(
         draft: state.draft,
         settings: state.settings,
         theme: state.theme,
+        uploadProvider: state.uploadProvider,
       }),
     },
   ),

@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  Plus,
   Check,
   ImagePlus,
   Info,
@@ -25,6 +26,13 @@ import { useAppStore } from './store/appStore'
 import type { Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageResponse, User } from './types/api'
 
 type Overlay = 'account' | 'admin' | null
+type PendingRequest = {
+  sessionId: number
+  response: GenerateResponse
+  message: string
+  assetIds: number[]
+  settings: { size: string; resolution: string; quality: string; count: number }
+}
 
 export function App() {
   const token = useAppStore((s) => s.token)
@@ -137,7 +145,10 @@ function Workspace() {
   const [error, setError] = useState('')
   const [streamingText, setStreamingText] = useState('')
   const [thinkingText, setThinkingText] = useState('')
-  const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([])
+  const [streamingSessionId, setStreamingSessionId] = useState<number | null>(null)
+  const [optimisticMessages, setOptimisticMessages] = useState<Record<number, Message[]>>({})
+  const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null)
+  const [completedNotices, setCompletedNotices] = useState<Record<number, boolean>>({})
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -198,9 +209,21 @@ function Workspace() {
     return () => window.clearInterval(timer)
   }, [detail?.tasks, activeSessionId])
 
+  useEffect(() => {
+    const hasRunningSession = sessions.some((session) => session.task_status === 'pending' || session.task_status === 'processing')
+    if (!hasRunningSession) return
+    const timer = window.setInterval(() => {
+      refreshSessions().catch(() => undefined)
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [sessions])
+
   const tasks = detail?.tasks ?? []
   const assets = detail?.assets ?? []
   const messages = detail?.messages ?? []
+  const visibleStreamingText = streamingSessionId === activeSessionId ? streamingText : ''
+  const visibleThinkingText = streamingSessionId === activeSessionId ? thinkingText : ''
+  const visibleOptimisticMessages = activeSessionId ? optimisticMessages[activeSessionId] ?? [] : []
 
   return (
     <main className="app-shell">
@@ -222,10 +245,14 @@ function Workspace() {
               className={session.id === activeSessionId ? 'active' : ''}
               onClick={() => {
                 setActiveSessionId(session.id)
+                if (session.task_status === 'completed') {
+                  setCompletedNotices((items) => ({ ...items, [session.id]: false }))
+                }
                 setMobilePanel(false)
               }}
               title={session.title}
             >
+              <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
               {session.title}
             </button>
           ))}
@@ -264,17 +291,22 @@ function Workspace() {
           </button>
         </header>
         {error && <p className="inline-error">{error}</p>}
-        <MessageStream messages={[...messages, ...optimisticMessages]} tasks={tasks} streamingText={streamingText} thinkingText={thinkingText} />
+        <MessageStream messages={[...messages, ...visibleOptimisticMessages]} tasks={tasks} streamingText={visibleStreamingText} thinkingText={visibleThinkingText} />
         <Composer
           sessionId={activeSessionId}
           assets={assets}
           onChanged={async () => {
             await refreshWorkspace()
-            setOptimisticMessages([])
+            if (activeSessionId) {
+              setOptimisticMessages((items) => ({ ...items, [activeSessionId]: [] }))
+            }
           }}
           setStreamingText={setStreamingText}
           setThinkingText={setThinkingText}
+          setStreamingSessionId={setStreamingSessionId}
           setOptimisticMessages={setOptimisticMessages}
+          pendingRequest={pendingRequest?.sessionId === activeSessionId ? pendingRequest : null}
+          setPendingRequest={setPendingRequest}
         />
       </section>
 
@@ -287,6 +319,15 @@ function Workspace() {
       {overlay === 'admin' && user?.role === 'admin' && <AdminPanel onClose={() => setOverlay(null)} />}
     </main>
   )
+}
+
+function SessionDot({ session, hasRequest, completedNotice }: { session: Session; hasRequest: boolean; completedNotice?: boolean }) {
+  let cls = ''
+  if (hasRequest) cls = 'request'
+  else if (session.task_status === 'pending' || session.task_status === 'processing') cls = 'working'
+  else if (session.task_status === 'completed' && completedNotice !== false) cls = 'done'
+  if (!cls) return <span className="session-dot empty" />
+  return <span className={`session-dot ${cls}`} />
 }
 
 function EditableTitle({ title, onSave }: { title: string; onSave: (title: string) => Promise<void> }) {
@@ -368,13 +409,17 @@ function MessageStream({
       ))}
       {latestTask && (
         <article className="task-card">
-          <div className="task-meta">
-            <span>{latestTask.status}</span>
-            <strong>{latestTask.progress}%</strong>
-          </div>
-          <div className="progress">
-            <span style={{ width: `${Math.max(latestTask.progress, latestTask.status === 'completed' ? 100 : 8)}%` }} />
-          </div>
+          {latestTask.status !== 'completed' && (
+            <>
+              <div className="task-meta">
+                <span>{latestTask.status}</span>
+                <strong>{latestTask.progress}%</strong>
+              </div>
+              <div className="progress">
+                <span style={{ width: `${Math.max(latestTask.progress, 8)}%` }} />
+              </div>
+            </>
+          )}
           {latestTask.error && <p className="form-error">{latestTask.error}</p>}
           {resultImages.length > 0 && (
             <div className="result-grid">
@@ -410,40 +455,56 @@ function Composer({
   onChanged,
   setStreamingText,
   setThinkingText,
+  setStreamingSessionId,
   setOptimisticMessages,
+  pendingRequest,
+  setPendingRequest,
 }: {
   sessionId: number | null
   assets: Asset[]
   onChanged: () => void | Promise<void>
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
   setThinkingText: React.Dispatch<React.SetStateAction<string>>
-  setOptimisticMessages: React.Dispatch<React.SetStateAction<Message[]>>
+  setStreamingSessionId: React.Dispatch<React.SetStateAction<number | null>>
+  setOptimisticMessages: React.Dispatch<React.SetStateAction<Record<number, Message[]>>>
+  pendingRequest: PendingRequest | null
+  setPendingRequest: React.Dispatch<React.SetStateAction<PendingRequest | null>>
 }) {
   const draft = useAppStore((s) => s.draft)
   const setDraft = useAppStore((s) => s.setDraft)
   const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
+  const toggleAsset = useAppStore((s) => s.toggleAsset)
   const clearSelectedAssets = useAppStore((s) => s.clearSelectedAssets)
   const settings = useAppStore((s) => s.settings)
   const setSettings = useAppStore((s) => s.setSettings)
+  const uploadProvider = useAppStore((s) => s.uploadProvider)
+  const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const [busy, setBusy] = useState(false)
+  const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
-  const [pending, setPending] = useState<GenerateResponse | null>(null)
   const [modalSettings, setModalSettings] = useState(settings)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const selectedAssets = assets.filter((asset) => selectedAssetIds.includes(asset.id))
 
-  async function requestGenerate(extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string }) {
-    if (!sessionId || !draft.trim()) return
+  async function requestGenerate(
+    targetSessionId: number,
+    message: string,
+    assetIds: number[],
+    baseSettings: typeof settings,
+    extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string },
+  ) {
+    if (!message.trim()) return
     setBusy(true)
     setError('')
     try {
-      const res = await api.generate(sessionId, {
-        message: draft,
-        asset_ids: selectedAssetIds,
-        ...settings,
+      const res = await api.generate(targetSessionId, {
+        message,
+        asset_ids: assetIds,
+        ...baseSettings,
         ...extra,
       })
       if (res.requires_confirmation) {
-        setPending(res)
+        setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, settings: baseSettings })
         setModalSettings({
           size: res.plan.size,
           resolution: res.plan.resolution,
@@ -468,18 +529,27 @@ function Composer({
     event.preventDefault()
     if (!sessionId || !draft.trim()) return
     const submitted = draft.trim()
+    const submittedAssetIds = [...selectedAssetIds]
+    const submittedSettings = { ...settings }
+    const submittedAssets = assets.filter((asset) => submittedAssetIds.includes(asset.id))
     const now = new Date().toISOString()
-    setOptimisticMessages([
-      {
-        id: -Date.now(),
-        session_id: sessionId,
-        role: 'user',
-        content: submitted,
-        created_at: now,
-      },
-    ])
+    setOptimisticMessages((items) => ({
+      ...items,
+      [sessionId]: [
+        {
+          id: -Date.now(),
+          session_id: sessionId,
+          role: 'user',
+          content: withReferenceMarkdown(submitted, submittedAssets),
+          created_at: now,
+        },
+      ],
+    }))
+    setDraft('')
+    clearSelectedAssets()
     setBusy(true)
     setError('')
+    setStreamingSessionId(sessionId)
     setStreamingText('')
     setThinkingText('')
     let keepStream = false
@@ -489,8 +559,8 @@ function Composer({
         sessionId,
         {
           message: submitted,
-          asset_ids: selectedAssetIds,
-          ...settings,
+          asset_ids: submittedAssetIds,
+          ...submittedSettings,
         },
         (event) => {
           if (event.type === 'content') {
@@ -499,7 +569,7 @@ function Composer({
             setThinkingText((text) => text + event.text)
           } else if (event.type === 'confirm') {
             keepStream = true
-            setPending(event)
+            setPendingRequest({ sessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
             setModalSettings({
               size: event.plan.size,
               resolution: event.plan.resolution,
@@ -508,8 +578,6 @@ function Composer({
             })
           } else if (event.type === 'done') {
             completed = true
-            setDraft('')
-            clearSelectedAssets()
           } else if (event.type === 'error') {
             setError(event.error)
           }
@@ -525,24 +593,42 @@ function Composer({
       if (!keepStream) {
         setStreamingText('')
         setThinkingText('')
+        setStreamingSessionId(null)
       }
     }
   }
 
   async function confirmWith(nextSettings: typeof settings, persist: boolean) {
-    if (!pending) return
+    if (!pendingRequest) return
     if (persist) {
       setSettings(nextSettings)
     }
-    await requestGenerate({
+    await requestGenerate(pendingRequest.sessionId, pendingRequest.message, pendingRequest.assetIds, pendingRequest.settings, {
       ...nextSettings,
       confirmed: true,
-      prompt: pending.plan.prompt,
-      assistant_message: pending.plan.assistant_message,
+      prompt: pendingRequest.response.plan.prompt,
+      assistant_message: pendingRequest.response.plan.assistant_message,
     })
-    setPending(null)
-    setStreamingText('')
-    setThinkingText('')
+    setPendingRequest(null)
+  }
+
+  async function uploadFiles(files: FileList | File[] | null) {
+    if (!sessionId || !files || files.length === 0) return
+    setUploading(true)
+    setError('')
+    try {
+      for (const file of Array.from(files)) {
+        if (file.type.startsWith('image/')) {
+          const res = await api.uploadAsset(sessionId, file, uploadProvider)
+          toggleAsset(res.asset.id)
+        }
+      }
+      await onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '上传失败')
+    } finally {
+      setUploading(false)
+    }
   }
 
   return (
@@ -551,14 +637,38 @@ function Composer({
         {selectedAssets.length > 0 && (
           <div className="selected-strip">
             {selectedAssets.map((asset, index) => (
-              <span key={asset.id}>图{index + 1}: {asset.file_name}</span>
+              <span key={asset.id} title={asset.file_name}>
+                <img src={asset.url} alt={asset.file_name} />
+                图{index + 1}
+              </span>
             ))}
           </div>
         )}
         <div className="composer-box">
+          <button type="button" className="icon-button" onClick={() => fileInputRef.current?.click()} title="上传参考图">
+            {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
+          </button>
+          <input
+            ref={fileInputRef}
+            className="hidden-file"
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(event) => {
+              uploadFiles(event.target.files)
+              event.currentTarget.value = ''
+            }}
+          />
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
+              if (files.length > 0) {
+                event.preventDefault()
+                uploadFiles(files)
+              }
+            }}
             placeholder="描述你想要的画面或修改。"
             rows={3}
           />
@@ -568,20 +678,28 @@ function Composer({
         </div>
         {error && <p className="form-error">{error}</p>}
       </form>
-      {pending?.requires_confirmation && (
+      <div className="upload-provider">
+        <span>上传到</span>
+        <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
+          <option value="evolink">Evolink</option>
+          <option value="maxqi">MaxQi</option>
+        </select>
+      </div>
+      {pendingRequest?.response.requires_confirmation && (
         <PlanConfirmDialog
-          plan={pending.plan}
+          plan={pendingRequest.response.plan}
           settings={settings}
           modalSettings={modalSettings}
           setModalSettings={setModalSettings}
           onUseCurrent={() => confirmWith(settings, false)}
           onUseCustom={() => confirmWith(modalSettings, true)}
-          onContinue={() => setPending(null)}
+          onContinue={() => setPendingRequest(null)}
           onCancel={() => {
-            setPending(null)
-            setOptimisticMessages([])
+            setPendingRequest(null)
+            setOptimisticMessages((items) => (sessionId ? { ...items, [sessionId]: [] } : items))
             setStreamingText('')
             setThinkingText('')
+            setStreamingSessionId(null)
             setError('已取消本次生图')
           }}
         />
@@ -596,6 +714,12 @@ function MarkdownText({ text }: { text: string }) {
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   )
+}
+
+function withReferenceMarkdown(text: string, assets: Asset[]) {
+  if (assets.length === 0) return text
+  const refs = assets.map((asset, index) => `![图${index + 1}](${asset.url})`).join(' ')
+  return `${text}\n\n${refs}`
 }
 
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
@@ -704,6 +828,7 @@ function PlanConfirmDialog({
 function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null; assets: Asset[]; onChanged: () => void }) {
   const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
   const toggleAsset = useAppStore((s) => s.toggleAsset)
+  const uploadProvider = useAppStore((s) => s.uploadProvider)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -713,7 +838,7 @@ function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null;
     setError('')
     try {
       for (const file of Array.from(files)) {
-        await api.uploadAsset(sessionId, file)
+        await api.uploadAsset(sessionId, file, uploadProvider)
       }
       onChanged()
     } catch (err) {

@@ -13,6 +13,7 @@ type Config struct {
 	Server   ServerConfig   `toml:"server"`
 	Database DatabaseConfig `toml:"database"`
 	Storage  StorageConfig  `toml:"storage"`
+	Upload   UploadConfig   `toml:"upload"`
 	Billing  BillingConfig  `toml:"billing"`
 	Evolink  EvolinkConfig  `toml:"evolink"`
 	LLM      LLMConfig      `toml:"llm"`
@@ -32,6 +33,18 @@ type DatabaseConfig struct {
 type StorageConfig struct {
 	GeneratedDir string `toml:"generated_dir"`
 	PublicPrefix string `toml:"public_prefix"`
+}
+
+type UploadConfig struct {
+	DefaultProvider string              `toml:"default_provider"`
+	Providers       map[string]Provider `toml:"providers"`
+}
+
+type Provider struct {
+	Type       string `toml:"type"`
+	BaseURL    string `toml:"base_url"`
+	Token      string `toml:"token"`
+	StrategyID int    `toml:"strategy_id"`
 }
 
 type BillingConfig struct {
@@ -113,6 +126,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.PublicPrefix == "" {
 		c.Storage.PublicPrefix = "/generated"
+	}
+	if c.Upload.DefaultProvider == "" {
+		c.Upload.DefaultProvider = "evolink"
+	}
+	if c.Upload.Providers == nil {
+		c.Upload.Providers = map[string]Provider{}
+	}
+	if _, ok := c.Upload.Providers["evolink"]; !ok {
+		c.Upload.Providers["evolink"] = Provider{Type: "evolink"}
+	}
+	if _, ok := c.Upload.Providers["maxqi"]; !ok {
+		c.Upload.Providers["maxqi"] = Provider{Type: "lsky", BaseURL: "https://p.maxqi.top/api/v1"}
 	}
 	if c.Billing.SignupCredits == 0 {
 		c.Billing.SignupCredits = 20

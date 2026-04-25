@@ -13,6 +13,7 @@ export type Session = {
   tenant_id: number
   user_id: number
   title: string
+  task_status?: '' | 'pending' | 'processing' | 'completed' | 'failed'
   created_at: string
   updated_at: string
 }

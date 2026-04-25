@@ -33,12 +33,13 @@ type User struct {
 }
 
 type Session struct {
-	ID        int64     `json:"id"`
-	TenantID  int64     `json:"tenant_id"`
-	UserID    int64     `json:"user_id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         int64     `json:"id"`
+	TenantID   int64     `json:"tenant_id"`
+	UserID     int64     `json:"user_id"`
+	Title      string    `json:"title"`
+	TaskStatus string    `json:"task_status,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type Asset struct {
@@ -296,8 +297,8 @@ func (s *Store) CreateSession(ctx context.Context, user User, title string) (Ses
 
 func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, error) {
 	var session Session
-	err := s.db.QueryRowContext(ctx, `select id, tenant_id, user_id, title, created_at, updated_at from sessions where id = ? and tenant_id = ?`, id, user.TenantID).
-		Scan(&session.ID, &session.TenantID, &session.UserID, &session.Title, &session.CreatedAt, &session.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `select id, tenant_id, user_id, title, '', created_at, updated_at from sessions where id = ? and tenant_id = ?`, id, user.TenantID).
+		Scan(&session.ID, &session.TenantID, &session.UserID, &session.Title, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -305,7 +306,9 @@ func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, e
 }
 
 func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, tenant_id, user_id, title, created_at, updated_at from sessions where tenant_id = ? order by updated_at desc`, user.TenantID)
+	rows, err := s.db.QueryContext(ctx, `select s.id, s.tenant_id, s.user_id, s.title,
+		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
+		s.created_at, s.updated_at from sessions s where s.tenant_id = ? order by s.updated_at desc`, user.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +316,7 @@ func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) 
 	var sessions []Session
 	for rows.Next() {
 		var item Session
-		if err := rows.Scan(&item.ID, &item.TenantID, &item.UserID, &item.Title, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.UserID, &item.Title, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, item)

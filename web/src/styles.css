@@ -266,6 +266,10 @@ select:focus {
 }
 
 .session-list button {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
   min-height: 40px;
   text-align: left;
   border: 1px solid transparent;
@@ -276,6 +280,28 @@ select:focus {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.session-dot.empty {
+  background: transparent;
+}
+
+.session-dot.request {
+  background: #3898ec;
+}
+
+.session-dot.working {
+  background: #d6a63a;
+}
+
+.session-dot.done {
+  background: #4f8b58;
 }
 
 .session-list button.active {
@@ -391,6 +417,14 @@ select:focus {
 .markdown-body blockquote,
 .markdown-body pre {
   margin: 0;
+}
+
+.markdown-body img {
+  width: 58px;
+  height: 58px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .markdown-body ul,
@@ -558,12 +592,43 @@ pre {
 
 .selected-strip span {
   flex: 0 0 auto;
-  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 10px;
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--muted);
-  padding: 5px 9px;
+  padding: 4px 8px 4px 4px;
   font-size: 0.8rem;
+}
+
+.selected-strip img {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  object-fit: cover;
+}
+
+.hidden-file {
+  display: none;
+}
+
+.upload-provider {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 16px 10px;
+  color: var(--soft);
+  font-size: 0.8rem;
+  background: var(--bg);
+}
+
+.upload-provider select {
+  width: auto;
+  min-height: 34px;
+  padding: 5px 28px 5px 9px;
 }
 
 .tool-section {

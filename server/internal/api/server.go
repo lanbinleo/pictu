@@ -217,13 +217,13 @@ func (s *Server) uploadAsset(c *gin.Context) {
 		return
 	}
 	defer src.Close()
-	uploaded, err := s.evolink.UploadStream(c, file.Filename, file.Header.Get("Content-Type"), src)
+	uploaded, err := s.uploadReferenceImage(c, c.PostForm("provider"), file.Filename, file.Header.Get("Content-Type"), file.Size, src)
 	if err != nil {
 		fail(c, http.StatusBadGateway, err.Error())
 		return
 	}
 	user := currentUser(c)
-	asset, err := s.store.SaveAsset(c, user, sessionID, uploaded.OriginalName, uploaded.MIMEType, uploaded.FileURL, uploaded.FileSize)
+	asset, err := s.store.SaveAsset(c, user, sessionID, uploaded.FileName, uploaded.MIMEType, uploaded.URL, uploaded.SizeBytes)
 	if err != nil {
 		statusFromErr(c, err)
 		return

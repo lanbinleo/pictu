@@ -11,6 +11,18 @@ path = "pictu.db"
 generated_dir = "generated"
 public_prefix = "/generated"
 
+[upload]
+default_provider = "evolink"
+
+[upload.providers.evolink]
+type = "evolink"
+
+[upload.providers.maxqi]
+type = "lsky"
+base_url = "https://p.maxqi.top/api/v1"
+token = ""
+strategy_id = 0
+
 [billing]
 signup_credits = 20
 image_base_cost = 2
