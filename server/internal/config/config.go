@@ -46,10 +46,14 @@ type EvolinkConfig struct {
 }
 
 type LLMConfig struct {
-	Provider string `toml:"provider"`
-	BaseURL  string `toml:"base_url"`
-	APIKey   string `toml:"api_key"`
-	Model    string `toml:"model"`
+	Provider           string `toml:"provider"`
+	BaseURL            string `toml:"base_url"`
+	APIKey             string `toml:"api_key"`
+	Model              string `toml:"model"`
+	PlannerModel       string `toml:"planner_model"`
+	TitleModel         string `toml:"title_model"`
+	TimeoutSeconds     int    `toml:"timeout_seconds"`
+	MaxContextMessages int    `toml:"max_context_messages"`
 }
 
 func Load() (Config, error) {
@@ -126,6 +130,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Evolink.PollTimeoutSeconds == 0 {
 		c.Evolink.PollTimeoutSeconds = 180
+	}
+	if c.LLM.Provider == "" {
+		c.LLM.Provider = "builtin"
+	}
+	if c.LLM.PlannerModel == "" {
+		c.LLM.PlannerModel = c.LLM.Model
+	}
+	if c.LLM.TitleModel == "" {
+		c.LLM.TitleModel = c.LLM.Model
+	}
+	if c.LLM.TimeoutSeconds == 0 {
+		c.LLM.TimeoutSeconds = 45
+	}
+	if c.LLM.MaxContextMessages == 0 {
+		c.LLM.MaxContextMessages = 12
 	}
 }
 

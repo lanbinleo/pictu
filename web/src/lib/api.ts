@@ -1,5 +1,5 @@
 import { useAppStore } from '../store/appStore'
-import type { Asset, Session, SessionDetail, Task, UsageResponse, User } from '../types/api'
+import type { Asset, GenerateResponse, Session, SessionDetail, Task, UsageResponse, User } from '../types/api'
 
 type AuthResponse = {
   token: string
@@ -42,9 +42,19 @@ export const api = {
   },
   generate: (
     sessionId: number,
-    payload: { message: string; asset_ids: number[]; size: string; resolution: string; quality: string; count: number },
+    payload: {
+      message: string
+      asset_ids: number[]
+      size: string
+      resolution: string
+      quality: string
+      count: number
+      confirmed?: boolean
+      prompt?: string
+      assistant_message?: string
+    },
   ) =>
-    request<{ plan: unknown; task: Task }>(`/api/sessions/${sessionId}/generate`, {
+    request<GenerateResponse>(`/api/sessions/${sessionId}/generate`, {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

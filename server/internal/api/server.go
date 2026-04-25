@@ -26,11 +26,12 @@ type Server struct {
 	cfg     config.Config
 	store   *store.Store
 	evolink *evolink.Client
+	planner *Planner
 	router  *gin.Engine
 }
 
 func New(cfg config.Config, st *store.Store, ev *evolink.Client) *Server {
-	s := &Server{cfg: cfg, store: st, evolink: ev}
+	s := &Server{cfg: cfg, store: st, evolink: ev, planner: NewPlanner(cfg.LLM)}
 	s.router = s.routes()
 	return s
 }
@@ -235,12 +236,15 @@ func (s *Server) generate(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Message    string  `json:"message" binding:"required"`
-		AssetIDs   []int64 `json:"asset_ids"`
-		Size       string  `json:"size"`
-		Resolution string  `json:"resolution"`
-		Quality    string  `json:"quality"`
-		Count      int     `json:"count"`
+		Message          string  `json:"message" binding:"required"`
+		AssetIDs         []int64 `json:"asset_ids"`
+		Size             string  `json:"size"`
+		Resolution       string  `json:"resolution"`
+		Quality          string  `json:"quality"`
+		Count            int     `json:"count"`
+		Confirmed        bool    `json:"confirmed"`
+		Prompt           string  `json:"prompt"`
+		AssistantMessage string  `json:"assistant_message"`
 	}
 	if !bind(c, &req) {
 		return
@@ -257,14 +261,51 @@ func (s *Server) generate(c *gin.Context) {
 		imageURLs = append(imageURLs, asset.URL)
 		imageNames = append(imageNames, fmt.Sprintf("image %d (%s)", i+1, asset.FileName))
 	}
-	plan := BuildPlan(PlanInput{
-		UserText:   req.Message,
-		ImageNames: imageNames,
-		Size:       req.Size,
-		Resolution: req.Resolution,
-		Quality:    req.Quality,
-		Count:      req.Count,
-	})
+	contextMessages, err := s.store.ListMessages(c, user, sessionID)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	input := PlanInput{
+		UserText:        req.Message,
+		ImageNames:      imageNames,
+		Size:            req.Size,
+		Resolution:      req.Resolution,
+		Quality:         req.Quality,
+		Count:           req.Count,
+		ContextMessages: contextMessages,
+	}
+	var plan GenerationPlan
+	if req.Confirmed && req.Prompt != "" {
+		plan = sanitizePlan(GenerationPlan{
+			Prompt:           req.Prompt,
+			Size:             req.Size,
+			Resolution:       req.Resolution,
+			Quality:          req.Quality,
+			Count:            req.Count,
+			AssistantMessage: req.AssistantMessage,
+			ToolCalled:       true,
+		}, input)
+	} else {
+		plan, err = s.planner.Plan(c, input)
+		if err != nil {
+			plan = BuildPlan(input)
+		}
+	}
+	if !plan.ToolCalled {
+		_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
+		s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
+		c.JSON(http.StatusOK, gin.H{"plan": plan, "message": msg, "generated": false})
+		return
+	}
+	if !req.Confirmed {
+		changes := settingChanges(input, plan)
+		if len(changes) > 0 {
+			c.JSON(http.StatusOK, gin.H{"requires_confirmation": true, "plan": plan, "setting_changes": changes})
+			return
+		}
+	}
 	cost := EstimateCost(s.cfg.Billing.ImageBaseCost, s.cfg.Billing.ImageInputCost, s.cfg.Billing.LowQualityMultiplier, s.cfg.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
 		if errors.Is(err, store.ErrInsufficientCredits) {
@@ -296,10 +337,10 @@ func (s *Server) generate(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	assistantText := "I optimized your prompt and started the image task."
-	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", assistantText, plan.Prompt, task.ID)
+	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
+	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 	go s.pollTask(task.ID)
-	c.JSON(http.StatusOK, gin.H{"plan": plan, "task": localTask, "message": msg})
+	c.JSON(http.StatusOK, gin.H{"plan": plan, "task": localTask, "message": msg, "generated": true})
 }
 
 func (s *Server) getTask(c *gin.Context) {
@@ -422,6 +463,36 @@ func (s *Server) assetsByID(ctx context.Context, user store.User, ids []int64) (
 		assets = append(assets, asset)
 	}
 	return assets, nil
+}
+
+func (s *Server) maybeTitleSession(ctx context.Context, user store.User, sessionID int64, previous []store.Message, userText, assistantText string) {
+	if len(previous) > 0 {
+		return
+	}
+	title, err := s.planner.Title(ctx, userText, assistantText, time.Now())
+	if err != nil || strings.TrimSpace(title) == "" {
+		return
+	}
+	_, _ = s.store.UpdateSessionTitle(ctx, user, sessionID, title)
+}
+
+func settingChanges(input PlanInput, plan GenerationPlan) []gin.H {
+	var changes []gin.H
+	add := func(field string, current any, recommended any) {
+		if fmt.Sprint(current) == fmt.Sprint(recommended) {
+			return
+		}
+		changes = append(changes, gin.H{
+			"field":       field,
+			"current":     current,
+			"recommended": recommended,
+		})
+	}
+	add("size", input.Size, plan.Size)
+	add("resolution", input.Resolution, plan.Resolution)
+	add("quality", input.Quality, plan.Quality)
+	add("count", input.Count, plan.Count)
+	return changes
 }
 
 func (s *Server) authMiddleware() gin.HandlerFunc {

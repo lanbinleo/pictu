@@ -20,7 +20,7 @@ import {
 } from 'lucide-react'
 import { api } from './lib/api'
 import { useAppStore } from './store/appStore'
-import type { Asset, Message, Session, SessionDetail, Task, UsageResponse, User } from './types/api'
+import type { Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageResponse, User } from './types/api'
 
 type Overlay = 'account' | 'admin' | null
 
@@ -364,23 +364,38 @@ function Composer({ sessionId, assets, onChanged }: { sessionId: number | null; 
   const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
   const clearSelectedAssets = useAppStore((s) => s.clearSelectedAssets)
   const settings = useAppStore((s) => s.settings)
+  const setSettings = useAppStore((s) => s.setSettings)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [pending, setPending] = useState<GenerateResponse | null>(null)
+  const [modalSettings, setModalSettings] = useState(settings)
   const selectedAssets = assets.filter((asset) => selectedAssetIds.includes(asset.id))
 
-  async function submit(event: FormEvent) {
-    event.preventDefault()
+  async function requestGenerate(extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string }) {
     if (!sessionId || !draft.trim()) return
     setBusy(true)
     setError('')
     try {
-      await api.generate(sessionId, {
+      const res = await api.generate(sessionId, {
         message: draft,
         asset_ids: selectedAssetIds,
         ...settings,
+        ...extra,
       })
-      setDraft('')
-      clearSelectedAssets()
+      if (res.requires_confirmation) {
+        setPending(res)
+        setModalSettings({
+          size: res.plan.size,
+          resolution: res.plan.resolution,
+          quality: res.plan.quality,
+          count: res.plan.count,
+        })
+        return
+      }
+      if (res.generated || res.message) {
+        setDraft('')
+        clearSelectedAssets()
+      }
       onChanged()
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
@@ -389,28 +404,154 @@ function Composer({ sessionId, assets, onChanged }: { sessionId: number | null; 
     }
   }
 
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    await requestGenerate()
+  }
+
+  async function confirmWith(nextSettings: typeof settings, persist: boolean) {
+    if (!pending) return
+    if (persist) {
+      setSettings(nextSettings)
+    }
+    await requestGenerate({
+      ...nextSettings,
+      confirmed: true,
+      prompt: pending.plan.prompt,
+      assistant_message: pending.plan.assistant_message,
+    })
+    setPending(null)
+  }
+
   return (
-    <form className="composer" onSubmit={submit}>
-      {selectedAssets.length > 0 && (
-        <div className="selected-strip">
-          {selectedAssets.map((asset, index) => (
-            <span key={asset.id}>图{index + 1}: {asset.file_name}</span>
-          ))}
+    <>
+      <form className="composer" onSubmit={submit}>
+        {selectedAssets.length > 0 && (
+          <div className="selected-strip">
+            {selectedAssets.map((asset, index) => (
+              <span key={asset.id}>图{index + 1}: {asset.file_name}</span>
+            ))}
+          </div>
+        )}
+        <div className="composer-box">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="描述你想要的画面或修改。"
+            rows={3}
+          />
+          <button className="send-button" disabled={busy || !sessionId} title="发送给 Planner">
+            {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+          </button>
         </div>
-      )}
-      <div className="composer-box">
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="描述你想要的画面或修改。"
-          rows={3}
+        {error && <p className="form-error">{error}</p>}
+      </form>
+      {pending?.requires_confirmation && (
+        <PlanConfirmDialog
+          plan={pending.plan}
+          settings={settings}
+          modalSettings={modalSettings}
+          setModalSettings={setModalSettings}
+          onUseCurrent={() => confirmWith(settings, false)}
+          onUseCustom={() => confirmWith(modalSettings, true)}
+          onContinue={() => setPending(null)}
+          onCancel={() => {
+            setPending(null)
+            setError('已取消本次生图')
+          }}
         />
-        <button className="send-button" disabled={busy || !sessionId} title="生成">
-          {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
-        </button>
-      </div>
-      {error && <p className="form-error">{error}</p>}
-    </form>
+      )}
+    </>
+  )
+}
+
+function PlanConfirmDialog({
+  plan,
+  settings,
+  modalSettings,
+  setModalSettings,
+  onUseCurrent,
+  onUseCustom,
+  onContinue,
+  onCancel,
+}: {
+  plan: GenerationPlan
+  settings: { size: string; resolution: string; quality: string; count: number }
+  modalSettings: { size: string; resolution: string; quality: string; count: number }
+  setModalSettings: (settings: { size: string; resolution: string; quality: string; count: number }) => void
+  onUseCurrent: () => void
+  onUseCustom: () => void
+  onContinue: () => void
+  onCancel: () => void
+}) {
+  return (
+    <div className="overlay">
+      <section className="overlay-panel confirm-panel">
+        <header>
+          <h2>Planner 建议修改参数</h2>
+          <button className="icon-button" onClick={onContinue} title="继续讨论">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="overlay-body">
+          <div className="compare-grid">
+            <Metric label="当前比例" valueText={settings.size} />
+            <Metric label="建议比例" valueText={plan.size} />
+            <Metric label="当前清晰度" valueText={settings.resolution} />
+            <Metric label="建议清晰度" valueText={plan.resolution} />
+            <Metric label="当前质量" valueText={settings.quality} />
+            <Metric label="建议质量" valueText={plan.quality} />
+            <Metric label="当前数量" valueText={String(settings.count)} />
+            <Metric label="建议数量" valueText={String(plan.count)} />
+          </div>
+          <section className="panel-block">
+            <h3>直接修改后生成</h3>
+            <div className="settings-inline">
+              <select value={modalSettings.size} onChange={(e) => setModalSettings({ ...modalSettings, size: e.target.value })}>
+                {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((item) => (
+                  <option key={item}>{item}</option>
+                ))}
+              </select>
+              <select value={modalSettings.resolution} onChange={(e) => setModalSettings({ ...modalSettings, resolution: e.target.value })}>
+                {['1K', '2K', '4K'].map((item) => (
+                  <option key={item}>{item}</option>
+                ))}
+              </select>
+              <select value={modalSettings.quality} onChange={(e) => setModalSettings({ ...modalSettings, quality: e.target.value })}>
+                {['low', 'medium', 'high'].map((item) => (
+                  <option key={item}>{item}</option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min={1}
+                max={4}
+                value={modalSettings.count}
+                onChange={(e) => setModalSettings({ ...modalSettings, count: Number(e.target.value) })}
+              />
+            </div>
+          </section>
+          <details>
+            <summary>Prompt</summary>
+            <pre>{plan.prompt}</pre>
+          </details>
+          <div className="confirm-actions">
+            <button className="secondary-button" onClick={onCancel}>
+              取消生图
+            </button>
+            <button className="secondary-button" onClick={onContinue}>
+              继续讨论
+            </button>
+            <button className="secondary-button" onClick={onUseCurrent}>
+              保持当前并生成
+            </button>
+            <button className="primary-button" onClick={onUseCustom}>
+              修改并生成
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   )
 }
 
@@ -623,11 +764,11 @@ function Overlay({ title, children, onClose }: { title: string; children: React.
   )
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value, valueText }: { label: string; value?: number; valueText?: string }) {
   return (
     <div className="metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{valueText ?? value}</strong>
     </div>
   )
 }

@@ -84,3 +84,28 @@ export type UsageResponse = {
   ledger: CreditLedger[] | null
   assets: Asset[] | null
 }
+
+export type GenerationPlan = {
+  prompt: string
+  size: string
+  resolution: string
+  quality: string
+  count: number
+  assistant_message: string
+  tool_called: boolean
+}
+
+export type SettingChange = {
+  field: 'size' | 'resolution' | 'quality' | 'count'
+  current: string | number
+  recommended: string | number
+}
+
+export type GenerateResponse = {
+  plan: GenerationPlan
+  task?: Task
+  message?: Message
+  generated?: boolean
+  requires_confirmation?: boolean
+  setting_changes?: SettingChange[]
+}

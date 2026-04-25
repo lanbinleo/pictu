@@ -23,10 +23,12 @@ poll_interval_seconds = 3
 poll_timeout_seconds = 180
 
 [llm]
-# Reserved for a ChatGPT-compatible planner. The first version ships with a
-# deterministic planner so the product works without sending chat text to a
-# model that cannot see images.
+# Use "openai_compatible" for ChatGPT-compatible chat-completions APIs.
+# Keep "builtin" to run without an LLM while developing.
 provider = "builtin"
-base_url = ""
-api_key = ""
-model = ""
+base_url = "https://api.openai.com/v1"
+api_key = "YOUR_LLM_API_KEY"
+planner_model = "gpt-4.1"
+title_model = "gpt-4.1-mini"
+timeout_seconds = 45
+max_context_messages = 12
