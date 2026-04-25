@@ -1,5 +1,5 @@
 import { useAppStore } from '../store/appStore'
-import type { Asset, Session, SessionDetail, Task, User } from '../types/api'
+import type { Asset, Session, SessionDetail, Task, UsageResponse, User } from '../types/api'
 
 type AuthResponse = {
   token: string
@@ -32,6 +32,8 @@ export const api = {
   listSessions: () => request<{ sessions: Session[] | null }>('/api/sessions'),
   createSession: (title?: string) =>
     request<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ title }) }),
+  updateSession: (id: number, title: string) =>
+    request<{ session: Session }>(`/api/sessions/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
   getSession: (id: number) => request<SessionDetail>(`/api/sessions/${id}`),
   uploadAsset: (sessionId: number, file: File) => {
     const data = new FormData()
@@ -47,4 +49,8 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   getTask: (id: number) => request<{ task: Task }>(`/api/tasks/${id}`),
+  usage: () => request<UsageResponse>('/api/usage'),
+  adminUsers: () => request<{ users: User[] | null }>('/api/admin/users'),
+  adminAdjustCredits: (id: number, payload: { delta: number; reason?: string }) =>
+    request<{ user: User }>(`/api/admin/users/${id}/credits`, { method: 'POST', body: JSON.stringify(payload) }),
 }

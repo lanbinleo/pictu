@@ -60,9 +60,16 @@ func (s *Server) routes() *gin.Engine {
 	protected.GET("/sessions", s.listSessions)
 	protected.POST("/sessions", s.createSession)
 	protected.GET("/sessions/:id", s.getSession)
+	protected.PUT("/sessions/:id", s.updateSession)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
 	protected.POST("/sessions/:id/generate", s.generate)
 	protected.GET("/tasks/:id", s.getTask)
+	protected.GET("/usage", s.usage)
+
+	admin := protected.Group("/admin")
+	admin.Use(requireAdmin())
+	admin.GET("/users", s.adminUsers)
+	admin.POST("/users/:id/credits", s.adminAdjustCredits)
 
 	s.serveFrontend(r)
 	return r
@@ -147,6 +154,25 @@ func (s *Server) createSession(c *gin.Context) {
 	session, err := s.store.CreateSession(c, currentUser(c), req.Title)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+func (s *Server) updateSession(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		Title string `json:"title" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	session, err := s.store.UpdateSessionTitle(c, currentUser(c), id, req.Title)
+	if err != nil {
+		statusFromErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"session": session})
@@ -291,6 +317,65 @@ func (s *Server) getTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"task": task})
 }
 
+func (s *Server) usage(c *gin.Context) {
+	user := currentUser(c)
+	fresh, err := s.store.GetUserByID(c, user.ID)
+	if err != nil {
+		fail(c, http.StatusUnauthorized, "user not found")
+		return
+	}
+	summary, err := s.store.UsageSummary(c, fresh)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ledger, err := s.store.ListLedger(c, fresh, 80)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	assets, err := s.store.ListUserAssets(c, fresh, 100)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"summary": summary, "ledger": ledger, "assets": assets})
+}
+
+func (s *Server) adminUsers(c *gin.Context) {
+	users, err := s.store.AdminListUsers(c)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+func (s *Server) adminAdjustCredits(c *gin.Context) {
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	var req struct {
+		Delta  int    `json:"delta" binding:"required"`
+		Reason string `json:"reason"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	user, err := s.store.AdminAdjustCredits(c, currentUser(c), userID, req.Delta, req.Reason)
+	if err != nil {
+		if errors.Is(err, store.ErrInsufficientCredits) {
+			fail(c, http.StatusBadRequest, "credit balance cannot be negative")
+			return
+		}
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
 func (s *Server) pollTask(providerTaskID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Evolink.PollTimeout())
 	defer cancel()
@@ -301,6 +386,7 @@ func (s *Server) pollTask(providerTaskID string) {
 		select {
 		case <-ctx.Done():
 			_ = s.store.UpdateTask(context.Background(), providerTaskID, "failed", 0, "", "task polling timed out")
+			_ = s.store.RefundTaskCredits(context.Background(), providerTaskID)
 			return
 		case <-ticker.C:
 			task, err := s.evolink.GetTask(ctx, providerTaskID)
@@ -314,6 +400,9 @@ func (s *Server) pollTask(providerTaskID string) {
 			}
 			_ = s.store.UpdateTask(context.Background(), providerTaskID, task.Status, task.Progress, string(resultJSON), taskErr)
 			if task.Status == "completed" || task.Status == "failed" {
+				if task.Status == "failed" {
+					_ = s.store.RefundTaskCredits(context.Background(), providerTaskID)
+				}
 				return
 			}
 		}
@@ -356,6 +445,17 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			return
 		}
 		c.Set("user", user)
+		c.Next()
+	}
+}
+
+func requireAdmin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if currentUser(c).Role != "admin" {
+			fail(c, http.StatusForbidden, "admin access required")
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

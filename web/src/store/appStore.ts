@@ -14,6 +14,7 @@ type AppState = {
     quality: string
     count: number
   }
+  theme: 'light' | 'dark'
   setAuth: (token: string, user: User) => void
   clearAuth: () => void
   setUser: (user: User) => void
@@ -22,6 +23,7 @@ type AppState = {
   toggleAsset: (id: number) => void
   clearSelectedAssets: () => void
   setSettings: (settings: Partial<AppState['settings']>) => void
+  toggleTheme: () => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -38,6 +40,7 @@ export const useAppStore = create<AppState>()(
         quality: 'medium',
         count: 1,
       },
+      theme: 'light',
       setAuth: (token, user) => set({ token, user }),
       clearAuth: () => set({ token: '', user: null, activeSessionId: null, selectedAssetIds: [] }),
       setUser: (user) => set({ user }),
@@ -51,6 +54,7 @@ export const useAppStore = create<AppState>()(
         })),
       clearSelectedAssets: () => set({ selectedAssetIds: [] }),
       setSettings: (settings) => set((state) => ({ settings: { ...state.settings, ...settings } })),
+      toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
     }),
     {
       name: 'pictu-app-state',
@@ -60,6 +64,7 @@ export const useAppStore = create<AppState>()(
         activeSessionId: state.activeSessionId,
         draft: state.draft,
         settings: state.settings,
+        theme: state.theme,
       }),
     },
   ),

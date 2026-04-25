@@ -76,6 +76,26 @@ type Task struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+type CreditLedger struct {
+	ID        int64     `json:"id"`
+	TenantID  int64     `json:"tenant_id"`
+	UserID    int64     `json:"user_id"`
+	Delta     int       `json:"delta"`
+	Balance   int       `json:"balance"`
+	Reason    string    `json:"reason"`
+	RefID     string    `json:"ref_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type UsageSummary struct {
+	Credits         int `json:"credits"`
+	GeneratedTasks  int `json:"generated_tasks"`
+	CompletedTasks  int `json:"completed_tasks"`
+	FailedTasks     int `json:"failed_tasks"`
+	CreditsSpent    int `json:"credits_spent"`
+	ReferenceImages int `json:"reference_images"`
+}
+
 type SessionDetail struct {
 	Session  Session   `json:"session"`
 	Assets   []Asset   `json:"assets"`
@@ -184,6 +204,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if _, err := s.db.ExecContext(ctx, `update users set role = 'admin'
+		where id = (select min(id) from users)
+		and not exists (select 1 from users where role = 'admin')`); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -207,8 +232,16 @@ func (s *Store) CreateUserWithTenant(ctx context.Context, email, passwordHash, d
 	if err != nil {
 		return User{}, err
 	}
+	var existingUsers int
+	if err := tx.QueryRowContext(ctx, `select count(*) from users`).Scan(&existingUsers); err != nil {
+		return User{}, err
+	}
+	role := "member"
+	if existingUsers == 0 {
+		role = "admin"
+	}
 	res, err = tx.ExecContext(ctx, `insert into users (tenant_id, email, password_hash, display_name, role, credits) values (?, ?, ?, ?, ?, ?)`,
-		tenantID, email, passwordHash, displayName, "owner", signupCredits)
+		tenantID, email, passwordHash, displayName, role, signupCredits)
 	if err != nil {
 		return User{}, err
 	}
@@ -288,6 +321,28 @@ func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) 
 	return sessions, rows.Err()
 }
 
+func (s *Store) UpdateSessionTitle(ctx context.Context, user User, id int64, title string) (Session, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return Session{}, errors.New("title is required")
+	}
+	if len([]rune(title)) > 80 {
+		title = string([]rune(title)[:80])
+	}
+	res, err := s.db.ExecContext(ctx, `update sessions set title = ?, updated_at = current_timestamp where id = ? and tenant_id = ?`, title, id, user.TenantID)
+	if err != nil {
+		return Session{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Session{}, err
+	}
+	if affected == 0 {
+		return Session{}, ErrNotFound
+	}
+	return s.GetSession(ctx, user, id)
+}
+
 func (s *Store) GetSessionDetail(ctx context.Context, user User, id int64) (SessionDetail, error) {
 	session, err := s.GetSession(ctx, user, id)
 	if err != nil {
@@ -337,6 +392,26 @@ func (s *Store) GetAsset(ctx context.Context, user User, id int64) (Asset, error
 
 func (s *Store) ListAssets(ctx context.Context, user User, sessionID int64) ([]Asset, error) {
 	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, created_at from assets where session_id = ? and tenant_id = ? order by id`, sessionID, user.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Asset
+	for rows.Next() {
+		var item Asset
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.SizeBytes, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) ListUserAssets(ctx context.Context, user User, limit int) ([]Asset, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, created_at from assets where tenant_id = ? order by id desc limit ?`, user.TenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +579,138 @@ func (s *Store) AddCredits(ctx context.Context, user User, amount int, reason, r
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) ListLedger(ctx context.Context, user User, limit int) ([]CreditLedger, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	rows, err := s.db.QueryContext(ctx, `select id, tenant_id, user_id, delta, balance, reason, ref_id, created_at from credit_ledger where tenant_id = ? and user_id = ? order by id desc limit ?`, user.TenantID, user.ID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanLedger(rows)
+}
+
+func (s *Store) UsageSummary(ctx context.Context, user User) (UsageSummary, error) {
+	summary := UsageSummary{Credits: user.Credits}
+	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'completed' then 1 else 0 end), 0), coalesce(sum(case when status = 'failed' then 1 else 0 end), 0), coalesce(sum(cost), 0) from tasks where tenant_id = ? and user_id = ?`, user.TenantID, user.ID).
+		Scan(&summary.GeneratedTasks, &summary.CompletedTasks, &summary.FailedTasks, &summary.CreditsSpent)
+	if err != nil {
+		return UsageSummary{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `select count(*) from assets where tenant_id = ? and user_id = ?`, user.TenantID, user.ID).Scan(&summary.ReferenceImages); err != nil {
+		return UsageSummary{}, err
+	}
+	return summary, nil
+}
+
+func (s *Store) AdminListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx, `select id, tenant_id, email, password_hash, display_name, role, credits, created_at from users order by id asc`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.Role, &u.Credits, &u.CreatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) AdminAdjustCredits(ctx context.Context, admin User, targetUserID int64, delta int, reason string) (User, error) {
+	if delta == 0 {
+		return s.GetUserByID(ctx, targetUserID)
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "admin_adjustment"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback()
+	var target User
+	if err := tx.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, role, credits, created_at from users where id = ?`, targetUserID).
+		Scan(&target.ID, &target.TenantID, &target.Email, &target.Password, &target.DisplayName, &target.Role, &target.Credits, &target.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, ErrNotFound
+		}
+		return User{}, err
+	}
+	balance := target.Credits + delta
+	if balance < 0 {
+		return User{}, ErrInsufficientCredits
+	}
+	if _, err := tx.ExecContext(ctx, `update users set credits = ? where id = ?`, balance, targetUserID); err != nil {
+		return User{}, err
+	}
+	refID := fmt.Sprintf("admin:%d", admin.ID)
+	if _, err := tx.ExecContext(ctx, `insert into credit_ledger (tenant_id, user_id, delta, balance, reason, ref_id) values (?, ?, ?, ?, ?, ?)`,
+		target.TenantID, target.ID, delta, balance, reason, refID); err != nil {
+		return User{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(ctx, targetUserID)
+}
+
+func (s *Store) RefundTaskCredits(ctx context.Context, providerTaskID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var tenantID, userID int64
+	var cost int
+	if err := tx.QueryRowContext(ctx, `select tenant_id, user_id, cost from tasks where provider_task_id = ?`, providerTaskID).Scan(&tenantID, &userID, &cost); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if cost <= 0 {
+		return tx.Commit()
+	}
+	var existing int
+	if err := tx.QueryRowContext(ctx, `select count(*) from credit_ledger where user_id = ? and reason = 'generation_refund' and ref_id = ?`, userID, providerTaskID).Scan(&existing); err != nil {
+		return err
+	}
+	if existing > 0 {
+		return tx.Commit()
+	}
+	var credits int
+	if err := tx.QueryRowContext(ctx, `select credits from users where id = ?`, userID).Scan(&credits); err != nil {
+		return err
+	}
+	balance := credits + cost
+	if _, err := tx.ExecContext(ctx, `update users set credits = ? where id = ?`, balance, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `insert into credit_ledger (tenant_id, user_id, delta, balance, reason, ref_id) values (?, ?, ?, ?, ?, ?)`,
+		tenantID, userID, cost, balance, "generation_refund", providerTaskID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func scanLedger(rows *sql.Rows) ([]CreditLedger, error) {
+	var items []CreditLedger
+	for rows.Next() {
+		var item CreditLedger
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.UserID, &item.Delta, &item.Balance, &item.Reason, &item.RefID, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Store) touchSession(ctx context.Context, id int64) error {

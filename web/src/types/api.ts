@@ -58,3 +58,29 @@ export type SessionDetail = {
   messages: Message[] | null
   tasks: Task[] | null
 }
+
+export type CreditLedger = {
+  id: number
+  tenant_id: number
+  user_id: number
+  delta: number
+  balance: number
+  reason: string
+  ref_id: string
+  created_at: string
+}
+
+export type UsageSummary = {
+  credits: number
+  generated_tasks: number
+  completed_tasks: number
+  failed_tasks: number
+  credits_spent: number
+  reference_images: number
+}
+
+export type UsageResponse = {
+  summary: UsageSummary
+  ledger: CreditLedger[] | null
+  assets: Asset[] | null
+}
