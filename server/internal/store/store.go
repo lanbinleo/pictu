@@ -33,13 +33,14 @@ type User struct {
 }
 
 type Session struct {
-	ID         int64     `json:"id"`
-	TenantID   int64     `json:"tenant_id"`
-	UserID     int64     `json:"user_id"`
-	Title      string    `json:"title"`
-	TaskStatus string    `json:"task_status,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         int64      `json:"id"`
+	TenantID   int64      `json:"tenant_id"`
+	UserID     int64      `json:"user_id"`
+	Title      string     `json:"title"`
+	TaskStatus string     `json:"task_status,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 }
 
 type Asset struct {
@@ -125,6 +126,32 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`pragma table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`alter table %s add column %s %s`, table, column, definition))
+	return err
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{
 		`create table if not exists tenants (
@@ -205,6 +232,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.ensureColumn(ctx, "sessions", "archived_at", "datetime"); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `update users set role = 'admin'
 		where id = (select min(id) from users)
 		and not exists (select 1 from users where role = 'admin')`); err != nil {
@@ -284,6 +314,9 @@ func (s *Store) CreateSession(ctx context.Context, user User, title string) (Ses
 	if strings.TrimSpace(title) == "" {
 		title = "New image session"
 	}
+	if err := s.DeleteEmptySessions(ctx, user); err != nil {
+		return Session{}, err
+	}
 	res, err := s.db.ExecContext(ctx, `insert into sessions (tenant_id, user_id, title) values (?, ?, ?)`, user.TenantID, user.ID, title)
 	if err != nil {
 		return Session{}, err
@@ -297,10 +330,14 @@ func (s *Store) CreateSession(ctx context.Context, user User, title string) (Ses
 
 func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, error) {
 	var session Session
-	err := s.db.QueryRowContext(ctx, `select id, tenant_id, user_id, title, '', created_at, updated_at from sessions where id = ? and tenant_id = ?`, id, user.TenantID).
-		Scan(&session.ID, &session.TenantID, &session.UserID, &session.Title, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt)
+	var archivedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `select id, tenant_id, user_id, title, '', created_at, updated_at, archived_at from sessions where id = ? and tenant_id = ? and archived_at is null`, id, user.TenantID).
+		Scan(&session.ID, &session.TenantID, &session.UserID, &session.Title, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt, &archivedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
+	}
+	if archivedAt.Valid {
+		session.ArchivedAt = &archivedAt.Time
 	}
 	return session, err
 }
@@ -308,20 +345,23 @@ func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, e
 func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `select s.id, s.tenant_id, s.user_id, s.title,
 		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
-		s.created_at, s.updated_at from sessions s where s.tenant_id = ? order by s.updated_at desc`, user.TenantID)
+		s.created_at, s.updated_at, s.archived_at from sessions s where s.tenant_id = ? and s.archived_at is null order by s.updated_at desc`, user.TenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var sessions []Session
-	for rows.Next() {
-		var item Session
-		if err := rows.Scan(&item.ID, &item.TenantID, &item.UserID, &item.Title, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt); err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, item)
+	return scanSessions(rows)
+}
+
+func (s *Store) ListAllSessions(ctx context.Context, user User) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `select s.id, s.tenant_id, s.user_id, s.title,
+		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
+		s.created_at, s.updated_at, s.archived_at from sessions s where s.tenant_id = ? order by coalesce(s.archived_at, s.updated_at) desc`, user.TenantID)
+	if err != nil {
+		return nil, err
 	}
-	return sessions, rows.Err()
+	defer rows.Close()
+	return scanSessions(rows)
 }
 
 func (s *Store) UpdateSessionTitle(ctx context.Context, user User, id int64, title string) (Session, error) {
@@ -344,6 +384,60 @@ func (s *Store) UpdateSessionTitle(ctx context.Context, user User, id int64, tit
 		return Session{}, ErrNotFound
 	}
 	return s.GetSession(ctx, user, id)
+}
+
+func (s *Store) ArchiveSession(ctx context.Context, user User, id int64) error {
+	res, err := s.db.ExecContext(ctx, `update sessions set archived_at = current_timestamp, updated_at = current_timestamp where id = ? and tenant_id = ? and archived_at is null`, id, user.TenantID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UnarchiveSession(ctx context.Context, user User, id int64) (Session, error) {
+	res, err := s.db.ExecContext(ctx, `update sessions set archived_at = null, updated_at = current_timestamp where id = ? and tenant_id = ?`, id, user.TenantID)
+	if err != nil {
+		return Session{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Session{}, err
+	}
+	if affected == 0 {
+		return Session{}, ErrNotFound
+	}
+	return s.GetSession(ctx, user, id)
+}
+
+func (s *Store) DeleteSession(ctx context.Context, user User, id int64) error {
+	res, err := s.db.ExecContext(ctx, `delete from sessions where id = ? and tenant_id = ?`, id, user.TenantID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteEmptySessions(ctx context.Context, user User) error {
+	_, err := s.db.ExecContext(ctx, `delete from sessions
+		where tenant_id = ? and user_id = ? and archived_at is null
+		and not exists (select 1 from messages where messages.session_id = sessions.id)
+		and not exists (select 1 from assets where assets.session_id = sessions.id)
+		and not exists (select 1 from tasks where tasks.session_id = sessions.id)`, user.TenantID, user.ID)
+	return err
 }
 
 func (s *Store) GetSessionDetail(ctx context.Context, user User, id int64) (SessionDetail, error) {
@@ -702,6 +796,22 @@ func (s *Store) RefundTaskCredits(ctx context.Context, providerTaskID string) er
 		return err
 	}
 	return tx.Commit()
+}
+
+func scanSessions(rows *sql.Rows) ([]Session, error) {
+	var sessions []Session
+	for rows.Next() {
+		var item Session
+		var archivedAt sql.NullTime
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.UserID, &item.Title, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt, &archivedAt); err != nil {
+			return nil, err
+		}
+		if archivedAt.Valid {
+			item.ArchivedAt = &archivedAt.Time
+		}
+		sessions = append(sessions, item)
+	}
+	return sessions, rows.Err()
 }
 
 func scanLedger(rows *sql.Rows) ([]CreditLedger, error) {

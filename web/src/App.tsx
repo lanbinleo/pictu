@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
+  Archive,
   Plus,
   Check,
   ImagePlus,
@@ -17,6 +18,8 @@ import {
   Shield,
   Sparkles,
   Sun,
+  RotateCcw,
+  Trash2,
   UserCircle,
   Wand2,
   X,
@@ -33,6 +36,7 @@ type PendingRequest = {
   assetIds: number[]
   settings: { size: string; resolution: string; quality: string; count: number }
 }
+type GenerationSettingsValue = PendingRequest['settings']
 
 export function App() {
   const token = useAppStore((s) => s.token)
@@ -156,6 +160,9 @@ function Workspace() {
     setSessions(items)
     if (!activeSessionId && items[0]) {
       setActiveSessionId(items[0].id)
+    } else if (activeSessionId && !items.some((item) => item.id === activeSessionId)) {
+      setActiveSessionId(items[0]?.id ?? null)
+      if (!items[0]) setDetail(null)
     }
   }
 
@@ -175,7 +182,8 @@ function Workspace() {
 
   async function createSession() {
     const res = await api.createSession('未命名会话')
-    setSessions((items) => [res.session, ...items])
+    const nextSessions = await api.listSessions().then((list) => list.sessions ?? []).catch(() => [res.session])
+    setSessions(nextSessions)
     setActiveSessionId(res.session.id)
     setDetail({ session: res.session, assets: [], messages: [], tasks: [] })
     setMobilePanel(false)
@@ -186,6 +194,17 @@ function Workspace() {
     const res = await api.updateSession(activeSessionId, title)
     setDetail((current) => (current ? { ...current, session: res.session } : current))
     setSessions((items) => items.map((item) => (item.id === res.session.id ? res.session : item)))
+  }
+
+  async function archiveSession(id: number) {
+    await api.archiveSession(id)
+    const nextSessions = await api.listSessions().then((res) => res.sessions ?? [])
+    setSessions(nextSessions)
+    if (id === activeSessionId) {
+      const next = nextSessions[0]
+      setActiveSessionId(next?.id ?? null)
+      setDetail(null)
+    }
   }
 
   useEffect(() => {
@@ -240,21 +259,25 @@ function Workspace() {
 
         <nav className="session-list">
           {sessions.map((session) => (
-            <button
-              key={session.id}
-              className={session.id === activeSessionId ? 'active' : ''}
-              onClick={() => {
-                setActiveSessionId(session.id)
-                if (session.task_status === 'completed') {
-                  setCompletedNotices((items) => ({ ...items, [session.id]: false }))
-                }
-                setMobilePanel(false)
-              }}
-              title={session.title}
-            >
-              <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
-              {session.title}
-            </button>
+            <div key={session.id} className={`session-row ${session.id === activeSessionId ? 'active' : ''}`}>
+              <button
+                className="session-select"
+                onClick={() => {
+                  setActiveSessionId(session.id)
+                  if (session.task_status === 'completed') {
+                    setCompletedNotices((items) => ({ ...items, [session.id]: false }))
+                  }
+                  setMobilePanel(false)
+                }}
+                title={session.title}
+              >
+                <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
+                <span className="session-title">{session.title}</span>
+              </button>
+              <button className="session-archive" title="归档对话" onClick={() => archiveSession(session.id).catch((err) => setError(err.message))}>
+                <Archive size={15} />
+              </button>
+            </div>
           ))}
         </nav>
 
@@ -315,7 +338,7 @@ function Workspace() {
         <GenerationSettings />
       </aside>
 
-      {overlay === 'account' && <UserCenter onClose={() => setOverlay(null)} />}
+      {overlay === 'account' && <UserCenter onClose={() => setOverlay(null)} onSessionsChanged={refreshWorkspace} />}
       {overlay === 'admin' && user?.role === 'admin' && <AdminPanel onClose={() => setOverlay(null)} />}
     </main>
   )
@@ -359,7 +382,7 @@ function EditableTitle({ title, onSave }: { title: string; onSave: (title: strin
   }
 
   return (
-    <div className="title-line">
+    <div className="title-line" title={title}>
       <h1>{title}</h1>
       <button className="icon-button quiet" onClick={() => setEditing(true)} title="修改会话名称">
         <Pencil size={16} />
@@ -483,8 +506,24 @@ function Composer({
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   const [modalSettings, setModalSettings] = useState(settings)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const selectedAssets = assets.filter((asset) => selectedAssetIds.includes(asset.id))
+
+  function openMore() {
+    if (window.matchMedia('(max-width: 980px)').matches) {
+      setMoreOpen(true)
+      return
+    }
+    fileInputRef.current?.click()
+  }
+
+  function chooseUploadFiles() {
+    setUploadDialogOpen(false)
+    setMoreOpen(false)
+    window.setTimeout(() => fileInputRef.current?.click(), 0)
+  }
 
   async function requestGenerate(
     targetSessionId: number,
@@ -645,9 +684,6 @@ function Composer({
           </div>
         )}
         <div className="composer-box">
-          <button type="button" className="icon-button" onClick={() => fileInputRef.current?.click()} title="上传参考图">
-            {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
-          </button>
           <input
             ref={fileInputRef}
             className="hidden-file"
@@ -672,19 +708,43 @@ function Composer({
             placeholder="描述你想要的画面或修改。"
             rows={3}
           />
-          <button className="send-button" disabled={busy || !sessionId} title="发送给 Planner">
-            {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
-          </button>
+          <div className="composer-actions">
+            <button type="button" className="icon-button" onClick={openMore} title="更多">
+              {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
+            </button>
+            <button className="send-button" disabled={busy || !sessionId} title="发送给 Planner">
+              {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
+            </button>
+          </div>
         </div>
         {error && <p className="form-error">{error}</p>}
       </form>
-      <div className="upload-provider">
+      <div className="upload-provider desktop-upload-provider">
         <span>上传到</span>
         <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
           <option value="evolink">Evolink</option>
           <option value="maxqi">MaxQi</option>
         </select>
       </div>
+      {moreOpen && (
+        <MobileMoreDrawer
+          assets={assets}
+          selectedAssetIds={selectedAssetIds}
+          toggleAsset={toggleAsset}
+          settings={settings}
+          setSettings={setSettings}
+          onClose={() => setMoreOpen(false)}
+          onUpload={() => setUploadDialogOpen(true)}
+        />
+      )}
+      {uploadDialogOpen && (
+        <UploadDestinationDialog
+          uploadProvider={uploadProvider}
+          setUploadProvider={setUploadProvider}
+          onClose={() => setUploadDialogOpen(false)}
+          onChoose={chooseUploadFiles}
+        />
+      )}
       {pendingRequest?.response.requires_confirmation && (
         <PlanConfirmDialog
           plan={pendingRequest.response.plan}
@@ -720,6 +780,177 @@ function withReferenceMarkdown(text: string, assets: Asset[]) {
   if (assets.length === 0) return text
   const refs = assets.map((asset, index) => `![图${index + 1}](${asset.url})`).join(' ')
   return `${text}\n\n${refs}`
+}
+
+function MobileMoreDrawer({
+  assets,
+  selectedAssetIds,
+  toggleAsset,
+  settings,
+  setSettings,
+  onClose,
+  onUpload,
+}: {
+  assets: Asset[]
+  selectedAssetIds: number[]
+  toggleAsset: (id: number) => void
+  settings: GenerationSettingsValue
+  setSettings: (settings: Partial<GenerationSettingsValue>) => void
+  onClose: () => void
+  onUpload: () => void
+}) {
+  const [page, setPage] = useState(0)
+  const touchStartX = useRef<number | null>(null)
+
+  function finishSwipe(x: number) {
+    if (touchStartX.current === null) return
+    const delta = x - touchStartX.current
+    if (Math.abs(delta) > 46) {
+      setPage((current) => (delta < 0 ? Math.min(1, current + 1) : Math.max(0, current - 1)))
+    }
+    touchStartX.current = null
+  }
+
+  return (
+    <div className="drawer-scrim" onClick={onClose}>
+      <section
+        className="more-drawer"
+        onClick={(event) => event.stopPropagation()}
+        onTouchStart={(event) => {
+          touchStartX.current = event.touches[0]?.clientX ?? null
+        }}
+        onTouchEnd={(event) => finishSwipe(event.changedTouches[0]?.clientX ?? 0)}
+      >
+        <div className="drawer-handle" />
+        <header className="drawer-head">
+          <h2>更多</h2>
+          <div className="drawer-tabs" role="tablist" aria-label="更多页面">
+            <button type="button" className={page === 0 ? 'active' : ''} onClick={() => setPage(0)}>
+              功能
+            </button>
+            <button type="button" className={page === 1 ? 'active' : ''} onClick={() => setPage(1)}>
+              参数
+            </button>
+          </div>
+        </header>
+        <div className="drawer-pages">
+          <div className="drawer-track" style={{ transform: `translateX(-${page * 50}%)` }}>
+            <div className="drawer-page">
+              <button type="button" className="drawer-tool" onClick={onUpload}>
+                <ImagePlus size={22} />
+                <span>上传参考图</span>
+              </button>
+              {assets.length > 0 && (
+                <div className="drawer-assets">
+                  {assets.map((asset) => (
+                    <button
+                      key={asset.id}
+                      className={selectedAssetIds.includes(asset.id) ? 'selected' : ''}
+                      onClick={() => toggleAsset(asset.id)}
+                      title={asset.file_name}
+                      type="button"
+                    >
+                      <img src={asset.url} alt={asset.file_name} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="drawer-page">
+              <SettingsControls settings={settings} setSettings={setSettings} />
+            </div>
+          </div>
+        </div>
+        <div className="drawer-dots" aria-hidden="true">
+          <span className={page === 0 ? 'active' : ''} />
+          <span className={page === 1 ? 'active' : ''} />
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function SettingsControls({
+  settings,
+  setSettings,
+}: {
+  settings: GenerationSettingsValue
+  setSettings: (settings: Partial<GenerationSettingsValue>) => void
+}) {
+  return (
+    <div className="settings-controls">
+      <label title="比例为 auto 时，resolution 不参与尺寸推导。">
+        比例
+        <select value={settings.size} onChange={(e) => setSettings({ size: e.target.value })}>
+          {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((item) => (
+            <option key={item}>{item}</option>
+          ))}
+        </select>
+      </label>
+      <label title="1K/2K/4K 只在比例尺寸下生效。">
+        清晰度
+        <select value={settings.resolution} onChange={(e) => setSettings({ resolution: e.target.value })}>
+          {['1K', '2K', '4K'].map((item) => (
+            <option key={item}>{item}</option>
+          ))}
+        </select>
+      </label>
+      <label title="high 约为 medium 的 4 倍成本，low 约为 0.25 倍。">
+        质量
+        <select value={settings.quality} onChange={(e) => setSettings({ quality: e.target.value })}>
+          {['low', 'medium', 'high'].map((item) => (
+            <option key={item}>{item}</option>
+          ))}
+        </select>
+      </label>
+      <label title="每张输出都会独立计费。">
+        数量
+        <input type="number" min={1} max={4} value={settings.count} onChange={(e) => setSettings({ count: Number(e.target.value) })} />
+      </label>
+    </div>
+  )
+}
+
+function UploadDestinationDialog({
+  uploadProvider,
+  setUploadProvider,
+  onClose,
+  onChoose,
+}: {
+  uploadProvider: string
+  setUploadProvider: (provider: string) => void
+  onClose: () => void
+  onChoose: () => void
+}) {
+  return (
+    <div className="overlay">
+      <section className="overlay-panel upload-dialog">
+        <header>
+          <h2>上传到哪里</h2>
+          <button className="icon-button" onClick={onClose} title="关闭">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="overlay-body">
+          <label>
+            上传位置
+            <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
+              <option value="evolink">Evolink</option>
+              <option value="maxqi">MaxQi</option>
+            </select>
+          </label>
+          <div className="confirm-actions upload-actions">
+            <button className="secondary-button" onClick={onClose}>
+              取消
+            </button>
+            <button className="primary-button" onClick={onChoose}>
+              选择图片
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
 }
 
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
@@ -883,51 +1114,51 @@ function GenerationSettings() {
         <h2>参数</h2>
         <Settings2 size={17} />
       </div>
-      <label title="比例为 auto 时，resolution 不参与尺寸推导。">
-        比例
-        <select value={settings.size} onChange={(e) => setSettings({ size: e.target.value })}>
-          {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((item) => (
-            <option key={item}>{item}</option>
-          ))}
-        </select>
-      </label>
-      <label title="1K/2K/4K 只在比例尺寸下生效。">
-        清晰度
-        <select value={settings.resolution} onChange={(e) => setSettings({ resolution: e.target.value })}>
-          {['1K', '2K', '4K'].map((item) => (
-            <option key={item}>{item}</option>
-          ))}
-        </select>
-      </label>
-      <label title="high 约为 medium 的 4 倍成本，low 约为 0.25 倍。">
-        质量
-        <select value={settings.quality} onChange={(e) => setSettings({ quality: e.target.value })}>
-          {['low', 'medium', 'high'].map((item) => (
-            <option key={item}>{item}</option>
-          ))}
-        </select>
-      </label>
-      <label title="每张输出都会独立计费。">
-        数量
-        <input
-          type="number"
-          min={1}
-          max={4}
-          value={settings.count}
-          onChange={(e) => setSettings({ count: Number(e.target.value) })}
-        />
-      </label>
+      <SettingsControls settings={settings} setSettings={setSettings} />
     </section>
   )
 }
 
-function UserCenter({ onClose }: { onClose: () => void }) {
+function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSessionsChanged: () => void | Promise<void> }) {
   const [data, setData] = useState<UsageResponse | null>(null)
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [tab, setTab] = useState<'overview' | 'sessions' | 'assets'>('overview')
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
 
+  async function loadSessions() {
+    const res = await api.listAllSessions()
+    setSessions(res.sessions ?? [])
+  }
+
+  async function updateSessionArchive(session: Session) {
+    setError('')
+    try {
+      if (session.archived_at) {
+        await api.unarchiveSession(session.id)
+      } else {
+        await api.archiveSession(session.id)
+      }
+      await Promise.all([loadSessions(), onSessionsChanged()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
+  async function permanentlyDeleteSession(session: Session) {
+    if (!window.confirm(`彻底删除「${session.title}」？这个操作不可恢复。`)) return
+    setError('')
+    try {
+      await api.deleteSession(session.id)
+      await Promise.all([loadSessions(), onSessionsChanged()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
   useEffect(() => {
     api.usage().then(setData).catch((err) => setError(err.message))
+    loadSessions().catch((err) => setError(err.message))
   }, [])
 
   return (
@@ -935,34 +1166,75 @@ function UserCenter({ onClose }: { onClose: () => void }) {
       {error && <p className="form-error">{error}</p>}
       {data ? (
         <>
-          <div className="metric-grid">
-            <Metric label="Credits" value={data.summary.credits} />
-            <Metric label="生成" value={data.summary.generated_tasks} />
-            <Metric label="已完成" value={data.summary.completed_tasks} />
-            <Metric label="参考图" value={data.summary.reference_images} />
+          <div className="tabs center-tabs">
+            <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>
+              概览
+            </button>
+            <button type="button" className={tab === 'sessions' ? 'active' : ''} onClick={() => setTab('sessions')}>
+              对话管理
+            </button>
+            <button type="button" className={tab === 'assets' ? 'active' : ''} onClick={() => setTab('assets')}>
+              参考图
+            </button>
           </div>
-          <section className="panel-block">
-            <h3>账单</h3>
-            <div className="ledger-list">
-              {(data.ledger ?? []).map((item) => (
-                <div key={item.id}>
-                  <span>{item.reason}</span>
-                  <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
-                  <small>{new Date(item.created_at).toLocaleString()}</small>
+          {tab === 'overview' && (
+            <>
+              <div className="metric-grid">
+                <Metric label="Credits" value={data.summary.credits} />
+                <Metric label="生成" value={data.summary.generated_tasks} />
+                <Metric label="已完成" value={data.summary.completed_tasks} />
+                <Metric label="参考图" value={data.summary.reference_images} />
+              </div>
+              <section className="panel-block">
+                <h3>账单</h3>
+                <div className="ledger-list">
+                  {(data.ledger ?? []).map((item) => (
+                    <div key={item.id}>
+                      <span>{item.reason}</span>
+                      <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
+                      <small>{new Date(item.created_at).toLocaleString()}</small>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-          </section>
-          <section className="panel-block">
-            <h3>参考图</h3>
-            <div className="asset-grid library">
-              {(data.assets ?? []).map((asset) => (
-                <button key={asset.id} onClick={() => setPreview(asset.url)} title={asset.file_name}>
-                  <img src={asset.url} alt={asset.file_name} />
-                </button>
-              ))}
-            </div>
-          </section>
+              </section>
+            </>
+          )}
+          {tab === 'sessions' && (
+            <section className="panel-block">
+              <h3>对话管理</h3>
+              <div className="session-manager">
+                {sessions.map((session) => (
+                  <div key={session.id} className="session-manager-row">
+                    <div>
+                      <strong title={session.title}>{session.title}</strong>
+                      <span>{session.archived_at ? `已归档 · ${new Date(session.archived_at).toLocaleString()}` : `活跃 · ${new Date(session.updated_at).toLocaleString()}`}</span>
+                    </div>
+                    <button className="secondary-button" onClick={() => updateSessionArchive(session)}>
+                      {session.archived_at ? <RotateCcw size={16} /> : <Archive size={16} />}
+                      {session.archived_at ? '恢复' : '归档'}
+                    </button>
+                    <button className="secondary-button danger-button" onClick={() => permanentlyDeleteSession(session)}>
+                      <Trash2 size={16} />
+                      彻底删除
+                    </button>
+                  </div>
+                ))}
+                {sessions.length === 0 && <p className="empty-note">还没有对话</p>}
+              </div>
+            </section>
+          )}
+          {tab === 'assets' && (
+            <section className="panel-block">
+              <h3>参考图</h3>
+              <div className="asset-grid library">
+                {(data.assets ?? []).map((asset) => (
+                  <button key={asset.id} onClick={() => setPreview(asset.url)} title={asset.file_name}>
+                    <img src={asset.url} alt={asset.file_name} />
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
         </>
       ) : (
         <Loader2 className="spin" size={20} />

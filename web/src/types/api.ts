@@ -16,6 +16,7 @@ export type Session = {
   task_status?: '' | 'pending' | 'processing' | 'completed' | 'failed'
   created_at: string
   updated_at: string
+  archived_at?: string
 }
 
 export type Asset = {

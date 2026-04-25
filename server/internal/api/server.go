@@ -59,9 +59,13 @@ func (s *Server) routes() *gin.Engine {
 	protected.Use(s.authMiddleware())
 	protected.GET("/me", s.me)
 	protected.GET("/sessions", s.listSessions)
+	protected.GET("/sessions/manage", s.listAllSessions)
 	protected.POST("/sessions", s.createSession)
 	protected.GET("/sessions/:id", s.getSession)
 	protected.PUT("/sessions/:id", s.updateSession)
+	protected.POST("/sessions/:id/archive", s.archiveSession)
+	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
+	protected.DELETE("/sessions/:id", s.deleteSession)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
 	protected.POST("/sessions/:id/generate", s.generate)
 	protected.POST("/sessions/:id/generate/stream", s.generateStream)
@@ -148,6 +152,15 @@ func (s *Server) listSessions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"sessions": items})
 }
 
+func (s *Server) listAllSessions(c *gin.Context) {
+	items, err := s.store.ListAllSessions(c, currentUser(c))
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sessions": items})
+}
+
 func (s *Server) createSession(c *gin.Context) {
 	var req struct {
 		Title string `json:"title"`
@@ -159,6 +172,43 @@ func (s *Server) createSession(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+func (s *Server) archiveSession(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	if err := s.store.ArchiveSession(c, currentUser(c), id); err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) unarchiveSession(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	session, err := s.store.UnarchiveSession(c, currentUser(c), id)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+func (s *Server) deleteSession(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	if err := s.store.DeleteSession(c, currentUser(c), id); err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) updateSession(c *gin.Context) {

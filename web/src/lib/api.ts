@@ -30,10 +30,14 @@ export const api = {
     request<AuthResponse>('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request<{ user: User }>('/api/me'),
   listSessions: () => request<{ sessions: Session[] | null }>('/api/sessions'),
+  listAllSessions: () => request<{ sessions: Session[] | null }>('/api/sessions/manage'),
   createSession: (title?: string) =>
     request<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ title }) }),
   updateSession: (id: number, title: string) =>
     request<{ session: Session }>(`/api/sessions/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
+  archiveSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}/archive`, { method: 'POST' }),
+  unarchiveSession: (id: number) => request<{ session: Session }>(`/api/sessions/${id}/unarchive`, { method: 'POST' }),
+  deleteSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   getSession: (id: number) => request<SessionDetail>(`/api/sessions/${id}`),
   uploadAsset: (sessionId: number, file: File, provider?: string) => {
     const data = new FormData()
