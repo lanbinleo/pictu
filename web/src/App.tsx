@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   Check,
   ImagePlus,
@@ -136,6 +137,7 @@ function Workspace() {
   const [error, setError] = useState('')
   const [streamingText, setStreamingText] = useState('')
   const [thinkingText, setThinkingText] = useState('')
+  const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([])
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -262,13 +264,17 @@ function Workspace() {
           </button>
         </header>
         {error && <p className="inline-error">{error}</p>}
-        <MessageStream messages={messages} tasks={tasks} streamingText={streamingText} thinkingText={thinkingText} />
+        <MessageStream messages={[...messages, ...optimisticMessages]} tasks={tasks} streamingText={streamingText} thinkingText={thinkingText} />
         <Composer
           sessionId={activeSessionId}
           assets={assets}
-          onChanged={refreshWorkspace}
+          onChanged={async () => {
+            await refreshWorkspace()
+            setOptimisticMessages([])
+          }}
           setStreamingText={setStreamingText}
           setThinkingText={setThinkingText}
+          setOptimisticMessages={setOptimisticMessages}
         />
       </section>
 
@@ -404,12 +410,14 @@ function Composer({
   onChanged,
   setStreamingText,
   setThinkingText,
+  setOptimisticMessages,
 }: {
   sessionId: number | null
   assets: Asset[]
-  onChanged: () => void
+  onChanged: () => void | Promise<void>
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
   setThinkingText: React.Dispatch<React.SetStateAction<string>>
+  setOptimisticMessages: React.Dispatch<React.SetStateAction<Message[]>>
 }) {
   const draft = useAppStore((s) => s.draft)
   const setDraft = useAppStore((s) => s.setDraft)
@@ -448,7 +456,7 @@ function Composer({
         setDraft('')
         clearSelectedAssets()
       }
-      onChanged()
+      await onChanged()
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
     } finally {
@@ -459,15 +467,28 @@ function Composer({
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!sessionId || !draft.trim()) return
+    const submitted = draft.trim()
+    const now = new Date().toISOString()
+    setOptimisticMessages([
+      {
+        id: -Date.now(),
+        session_id: sessionId,
+        role: 'user',
+        content: submitted,
+        created_at: now,
+      },
+    ])
     setBusy(true)
     setError('')
     setStreamingText('')
     setThinkingText('')
+    let keepStream = false
+    let completed = false
     try {
       await api.generateStream(
         sessionId,
         {
-          message: draft,
+          message: submitted,
           asset_ids: selectedAssetIds,
           ...settings,
         },
@@ -477,6 +498,7 @@ function Composer({
           } else if (event.type === 'thinking') {
             setThinkingText((text) => text + event.text)
           } else if (event.type === 'confirm') {
+            keepStream = true
             setPending(event)
             setModalSettings({
               size: event.plan.size,
@@ -485,9 +507,9 @@ function Composer({
               count: event.plan.count,
             })
           } else if (event.type === 'done') {
+            completed = true
             setDraft('')
             clearSelectedAssets()
-            onChanged()
           } else if (event.type === 'error') {
             setError(event.error)
           }
@@ -497,8 +519,13 @@ function Composer({
       setError(err instanceof Error ? err.message : '生成失败')
     } finally {
       setBusy(false)
-      setStreamingText('')
-      setThinkingText('')
+      if (completed) {
+        await onChanged()
+      }
+      if (!keepStream) {
+        setStreamingText('')
+        setThinkingText('')
+      }
     }
   }
 
@@ -514,6 +541,8 @@ function Composer({
       assistant_message: pending.plan.assistant_message,
     })
     setPending(null)
+    setStreamingText('')
+    setThinkingText('')
   }
 
   return (
@@ -550,6 +579,9 @@ function Composer({
           onContinue={() => setPending(null)}
           onCancel={() => {
             setPending(null)
+            setOptimisticMessages([])
+            setStreamingText('')
+            setThinkingText('')
             setError('已取消本次生图')
           }}
         />
@@ -561,7 +593,7 @@ function Composer({
 function MarkdownText({ text }: { text: string }) {
   return (
     <div className="markdown-body">
-      <ReactMarkdown>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
     </div>
   )
 }
@@ -895,7 +927,7 @@ function extractImages(task?: Task): string[] {
     const parsed = JSON.parse(task.result_json)
     const urls = new Set<string>()
     const walk = (value: unknown) => {
-      if (typeof value === 'string' && /^https?:\/\/.+\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) {
+      if (typeof value === 'string' && /^(https?:\/\/.+|\/generated\/.+)\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) {
         urls.add(value)
       } else if (Array.isArray(value)) {
         value.forEach(walk)

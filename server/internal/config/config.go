@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Server   ServerConfig   `toml:"server"`
 	Database DatabaseConfig `toml:"database"`
+	Storage  StorageConfig  `toml:"storage"`
 	Billing  BillingConfig  `toml:"billing"`
 	Evolink  EvolinkConfig  `toml:"evolink"`
 	LLM      LLMConfig      `toml:"llm"`
@@ -26,6 +27,11 @@ type ServerConfig struct {
 
 type DatabaseConfig struct {
 	Path string `toml:"path"`
+}
+
+type StorageConfig struct {
+	GeneratedDir string `toml:"generated_dir"`
+	PublicPrefix string `toml:"public_prefix"`
 }
 
 type BillingConfig struct {
@@ -82,6 +88,7 @@ func Load() (Config, error) {
 	cfg.applyDefaults()
 	cfg.Server.FrontendDist = cleanRelative(path, cfg.Server.FrontendDist)
 	cfg.Database.Path = cleanRelative(path, cfg.Database.Path)
+	cfg.Storage.GeneratedDir = cleanRelative(path, cfg.Storage.GeneratedDir)
 	return cfg, nil
 }
 
@@ -100,6 +107,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Database.Path == "" {
 		c.Database.Path = "../pictu.db"
+	}
+	if c.Storage.GeneratedDir == "" {
+		c.Storage.GeneratedDir = "generated"
+	}
+	if c.Storage.PublicPrefix == "" {
+		c.Storage.PublicPrefix = "/generated"
 	}
 	if c.Billing.SignupCredits == 0 {
 		c.Billing.SignupCredits = 20

@@ -2,6 +2,7 @@
 config.toml
 *.db
 *.db-*
+generated/
 
 # Frontend
 web/node_modules/

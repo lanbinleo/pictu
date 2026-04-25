@@ -7,6 +7,10 @@ jwt_secret = "change-me-before-production"
 [database]
 path = "pictu.db"
 
+[storage]
+generated_dir = "generated"
+public_prefix = "/generated"
+
 [billing]
 signup_credits = 20
 image_base_cost = 2

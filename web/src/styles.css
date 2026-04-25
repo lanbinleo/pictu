@@ -414,6 +414,28 @@ select:focus {
   padding: 10px;
 }
 
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.92rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-body th {
+  background: var(--panel-2);
+  font-weight: 650;
+}
+
 .streaming-message {
   margin: 0 16px 12px;
   align-self: flex-start;

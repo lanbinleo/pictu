@@ -559,6 +559,9 @@ func (s *Server) pollTask(providerTaskID string) {
 			if task.Error != nil {
 				taskErr = task.Error.Message
 			}
+			if task.Status == "completed" {
+				resultJSON = []byte(s.archiveTaskImages(ctx, providerTaskID, string(resultJSON)))
+			}
 			_ = s.store.UpdateTask(context.Background(), providerTaskID, task.Status, task.Progress, string(resultJSON), taskErr)
 			if task.Status == "completed" || task.Status == "failed" {
 				if task.Status == "failed" {
@@ -652,6 +655,9 @@ func requireAdmin() gin.HandlerFunc {
 }
 
 func (s *Server) serveFrontend(r *gin.Engine) {
+	if s.cfg.Storage.GeneratedDir != "" {
+		r.Static(strings.TrimRight(s.cfg.Storage.PublicPrefix, "/"), s.cfg.Storage.GeneratedDir)
+	}
 	dist := s.cfg.Server.FrontendDist
 	if info, err := os.Stat(dist); err == nil && info.IsDir() {
 		r.Static("/assets", filepath.Join(dist, "assets"))
