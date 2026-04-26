@@ -36,7 +36,7 @@ base_url = "https://api.evolink.ai"
 files_base_url = "https://files-api.evolink.ai"
 model = "gpt-image-2"
 poll_interval_seconds = 3
-poll_timeout_seconds = 180
+poll_timeout_seconds = 3600
 
 [llm]
 # Use "openai_compatible" for ChatGPT-compatible chat-completions APIs.

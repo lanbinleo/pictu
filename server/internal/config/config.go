@@ -167,7 +167,7 @@ func (c *Config) applyDefaults() {
 		c.Evolink.PollIntervalSeconds = 3
 	}
 	if c.Evolink.PollTimeoutSeconds == 0 {
-		c.Evolink.PollTimeoutSeconds = 180
+		c.Evolink.PollTimeoutSeconds = 3600
 	}
 	if c.LLM.Provider == "" {
 		c.LLM.Provider = "builtin"
