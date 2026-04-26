@@ -26,6 +26,7 @@ export type Asset = {
   file_name: string
   mime_type: string
   url: string
+  local_url?: string
   size_bytes: number
   provider: string
   content_hash: string

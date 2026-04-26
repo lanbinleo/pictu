@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -71,6 +72,7 @@ func (s *Server) routes() *gin.Engine {
 	protected.POST("/sessions/:id/archive", s.archiveSession)
 	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
 	protected.DELETE("/sessions/:id", s.deleteSession)
+	protected.GET("/assets", s.listAssets)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
 	protected.POST("/sessions/:id/assets/:asset_id/use", s.useAsset)
 	protected.DELETE("/assets/:asset_id", s.deleteAsset)
@@ -254,6 +256,15 @@ func (s *Server) getSession(c *gin.Context) {
 	c.JSON(http.StatusOK, detail)
 }
 
+func (s *Server) listAssets(c *gin.Context) {
+	assets, err := s.store.ListUserAssets(c, currentUser(c), 200)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"assets": assets})
+}
+
 func (s *Server) uploadAsset(c *gin.Context) {
 	sessionID, ok := pathID(c)
 	if !ok {
@@ -286,7 +297,17 @@ func (s *Server) uploadAsset(c *gin.Context) {
 	provider := s.normalizedUploadProvider(c.PostForm("provider"))
 	contentHash := sha256Hex(data)
 	user := currentUser(c)
+	localURL, err := s.backupReferenceImage(data, user, sessionID, file.Filename, file.Header.Get("Content-Type"), contentHash)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if existing, err := s.store.FindAssetByHash(c, user, sessionID, provider, contentHash); err == nil {
+		if existing.LocalURL == "" && localURL != "" {
+			if err := s.store.SetAssetLocalURL(c, user, existing.ID, localURL); err == nil {
+				existing.LocalURL = localURL
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{"asset": existing, "deduped": true})
 		return
 	}
@@ -295,7 +316,7 @@ func (s *Server) uploadAsset(c *gin.Context) {
 		fail(c, http.StatusBadGateway, err.Error())
 		return
 	}
-	asset, err := s.store.SaveAsset(c, user, sessionID, uploaded.FileName, uploaded.MIMEType, uploaded.URL, uploaded.SizeBytes, provider, contentHash)
+	asset, err := s.store.SaveAsset(c, user, sessionID, uploaded.FileName, uploaded.MIMEType, uploaded.URL, localURL, uploaded.SizeBytes, provider, contentHash)
 	if err != nil {
 		statusFromErr(c, err)
 		return
@@ -327,7 +348,7 @@ func (s *Server) useAsset(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"asset": existing, "deduped": true})
 		return
 	}
-	asset, err := s.store.SaveAsset(c, user, sessionID, source.FileName, source.MIMEType, source.URL, source.SizeBytes, source.Provider, source.ContentHash)
+	asset, err := s.store.SaveAsset(c, user, sessionID, source.FileName, source.MIMEType, source.URL, source.LocalURL, source.SizeBytes, source.Provider, source.ContentHash)
 	if err != nil {
 		statusFromErr(c, err)
 		return
@@ -380,6 +401,7 @@ func (s *Server) generate(c *gin.Context) {
 		imageURLs = append(imageURLs, asset.URL)
 		imageNames = append(imageNames, fmt.Sprintf("image %d (%s)", i+1, asset.FileName))
 	}
+	userMessageContent := messageWithReferences(req.Message, assets)
 	contextMessages, err := s.store.ListMessages(c, user, sessionID)
 	if err != nil {
 		statusFromErr(c, err)
@@ -423,7 +445,7 @@ func (s *Server) generate(c *gin.Context) {
 			fail(c, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+		_, _ = s.store.AddMessage(c, user, sessionID, "user", userMessageContent, "", "")
 		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
 		s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 		c.JSON(http.StatusOK, gin.H{"plan": plan, "message": msg, "generated": false})
@@ -445,7 +467,7 @@ func (s *Server) generate(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+	_, _ = s.store.AddMessage(c, user, sessionID, "user", userMessageContent, "", "")
 
 	evReq := evolink.ImageRequest{
 		Prompt:     plan.Prompt,
@@ -502,6 +524,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		imageURLs = append(imageURLs, asset.URL)
 		imageNames = append(imageNames, fmt.Sprintf("image %d (%s)", i+1, asset.FileName))
 	}
+	userMessageContent := messageWithReferences(req.Message, assets)
 	contextMessages, err := s.store.ListMessages(c, user, sessionID)
 	if err != nil {
 		statusFromErr(c, err)
@@ -561,7 +584,7 @@ func (s *Server) generateStream(c *gin.Context) {
 			_ = flush("error", gin.H{"error": err.Error()})
 			return
 		}
-		_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+		_, _ = s.store.AddMessage(c, user, sessionID, "user", userMessageContent, "", "")
 		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
 		s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 		_ = flush("done", gin.H{"plan": plan, "message": msg, "generated": false})
@@ -577,7 +600,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		_ = flush("error", gin.H{"error": err.Error()})
 		return
 	}
-	_, _ = s.store.AddMessage(c, user, sessionID, "user", req.Message, "", "")
+	_, _ = s.store.AddMessage(c, user, sessionID, "user", userMessageContent, "", "")
 	evReq := evolink.ImageRequest{
 		Prompt:     plan.Prompt,
 		ImageURLs:  imageURLs,
@@ -815,6 +838,71 @@ func (s *Server) normalizedUploadProvider(provider string) string {
 		provider = s.cfg.Upload.DefaultProvider
 	}
 	return provider
+}
+
+func (s *Server) backupReferenceImage(data []byte, user store.User, sessionID int64, fileName, mimeType, contentHash string) (string, error) {
+	if len(data) == 0 || s.cfg.Storage.GeneratedDir == "" {
+		return "", nil
+	}
+	ext := referenceImageExt(fileName, mimeType)
+	hashPart := contentHash
+	if len(hashPart) > 20 {
+		hashPart = hashPart[:20]
+	}
+	relDir := filepath.Join("reference-backups", fmt.Sprintf("tenant-%d", user.TenantID), fmt.Sprintf("session-%d", sessionID))
+	targetDir := filepath.Join(s.cfg.Storage.GeneratedDir, relDir)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+	name := hashPart + ext
+	target := filepath.Join(targetDir, name)
+	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(target, data, 0644); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	urlPath := path.Join(filepath.ToSlash(relDir), name)
+	return strings.TrimRight(s.cfg.Storage.PublicPrefix, "/") + "/" + urlPath, nil
+}
+
+func referenceImageExt(fileName, mimeType string) string {
+	switch strings.ToLower(strings.Split(mimeType, ";")[0]) {
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	}
+	switch strings.ToLower(filepath.Ext(fileName)) {
+	case ".png", ".webp", ".jpg", ".jpeg":
+		return strings.ToLower(filepath.Ext(fileName))
+	default:
+		return ".jpg"
+	}
+}
+
+func messageWithReferences(text string, assets []store.Asset) string {
+	if len(assets) == 0 {
+		return text
+	}
+	var refs []string
+	for i, asset := range assets {
+		url := asset.LocalURL
+		if strings.TrimSpace(url) == "" {
+			url = asset.URL
+		}
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		refs = append(refs, fmt.Sprintf("![图%d](%s)", i+1, url))
+	}
+	if len(refs) == 0 {
+		return text
+	}
+	return strings.TrimSpace(text) + "\n\n" + strings.Join(refs, " ")
 }
 
 func sha256Hex(data []byte) string {

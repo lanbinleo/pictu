@@ -39,6 +39,7 @@ export const api = {
   unarchiveSession: (id: number) => request<{ session: Session }>(`/api/sessions/${id}/unarchive`, { method: 'POST' }),
   deleteSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   getSession: (id: number) => request<SessionDetail>(`/api/sessions/${id}`),
+  listAssets: () => request<{ assets: Asset[] | null }>('/api/assets'),
   uploadAsset: (sessionId: number, file: File, provider?: string) => {
     const data = new FormData()
     data.append('file', file)

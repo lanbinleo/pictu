@@ -12,6 +12,7 @@ import {
   MessageSquarePlus,
   Moon,
   PanelLeft,
+  PanelRight,
   Pencil,
   Send,
   Settings2,
@@ -97,7 +98,7 @@ function AuthScreen() {
           <Sparkles size={18} />
           <span>PicTu</span>
         </div>
-        <h1>PicTu</h1>
+        <h1>艺术灵感从这开始</h1>
         <p>AI 图像会话工作台</p>
       </section>
 
@@ -163,6 +164,8 @@ function Workspace() {
   const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null)
   const [completedNotices, setCompletedNotices] = useState<Record<number, boolean>>({})
   const [toolDraft, setToolDraft] = useState<ToolDraft | null>(null)
+  const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [rightCollapsed, setRightCollapsed] = useState(false)
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -278,19 +281,50 @@ function Workspace() {
   const visibleThinkingText = streamingSessionId === activeSessionId ? thinkingText : ''
   const visibleToolDraft = toolDraft?.sessionId === activeSessionId ? toolDraft : null
   const visibleOptimisticMessages = activeSessionId ? optimisticMessages[activeSessionId] ?? [] : []
+  const conversationStarted =
+    messages.length > 0 ||
+    visibleOptimisticMessages.length > 0 ||
+    tasks.length > 0 ||
+    Boolean(visibleStreamingText || visibleThinkingText || visibleToolDraft)
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightCollapsed ? 'right-collapsed' : ''}`}>
       {mobilePanel && <button className="mobile-panel-scrim" aria-label="关闭会话列表" onClick={() => setMobilePanel(false)} />}
-      <aside className={`session-panel ${mobilePanel ? 'open' : ''}`}>
+      <aside className={`session-panel ${mobilePanel ? 'open' : ''} ${leftCollapsed ? 'collapsed' : ''}`}>
+        {leftCollapsed ? (
+          <div className="collapsed-rail left-rail">
+            <div className="rail-top">
+              <button className="rail-button" onClick={() => setLeftCollapsed(false)} title="展开会话栏">
+                <PanelLeft size={18} />
+              </button>
+              <button className="rail-button" onClick={createSession} title="新建会话">
+                <MessageSquarePlus size={18} />
+              </button>
+              <button className="rail-button" onClick={toggleTheme} title="切换明暗模式">
+                {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
+            </div>
+            <div className="rail-bottom">
+              <button className="rail-button" onClick={() => setOverlay('account')} title="用户中心">
+                <UserCircle size={18} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
         <div className="panel-head">
           <div className="brand-mark compact">
             <Sparkles size={16} />
             <span>PicTu</span>
           </div>
-          <button className="icon-button" onClick={createSession} title="新建会话">
-            <MessageSquarePlus size={18} />
-          </button>
+          <div className="panel-actions">
+            <button className="icon-button" onClick={() => setLeftCollapsed(true)} title="折叠会话栏">
+              <PanelLeft size={18} />
+            </button>
+            <button className="icon-button" onClick={createSession} title="新建会话">
+              <MessageSquarePlus size={18} />
+            </button>
+          </div>
         </div>
 
         <nav className="session-list">
@@ -340,6 +374,8 @@ function Workspace() {
             </button>
           </div>
         </div>
+          </>
+        )}
       </aside>
 
       <section className="chat-panel">
@@ -364,6 +400,7 @@ function Workspace() {
         <Composer
           sessionId={activeSessionId}
           assets={assets}
+          conversationStarted={conversationStarted}
           onChanged={async () => {
             await refreshWorkspace()
             if (activeSessionId) {
@@ -380,9 +417,23 @@ function Workspace() {
         />
       </section>
 
-      <aside className="asset-panel">
-        <AssetRack sessionId={activeSessionId} assets={assets} onChanged={() => refreshWorkspace()} />
-        <GenerationSettings />
+      <aside className={`asset-panel ${rightCollapsed ? 'collapsed' : ''}`}>
+        {rightCollapsed ? (
+          <button className="right-edge-toggle" onClick={() => setRightCollapsed(false)} title="展开参数栏">
+            <PanelRight size={18} />
+          </button>
+        ) : (
+          <>
+            <div className="asset-panel-head">
+              <span>工具</span>
+              <button className="icon-button" onClick={() => setRightCollapsed(true)} title="折叠参数栏">
+                <PanelRight size={18} />
+              </button>
+            </div>
+            <AssetRack sessionId={activeSessionId} assets={assets} onChanged={() => refreshWorkspace()} />
+            <GenerationSettings />
+          </>
+        )}
       </aside>
 
       {overlay === 'account' && <UserCenter activeSessionId={activeSessionId} onClose={() => setOverlay(null)} onSessionsChanged={refreshWorkspace} />}
@@ -476,20 +527,34 @@ function MessageStream({
       {visibleMessages.length === 0 && !liveTurn && (
         <div className="empty-state">
           <Sparkles size={24} />
-          <h2>开始一张图</h2>
+          <h2>今天想画点什么？</h2>
         </div>
       )}
-      {visibleMessages.map((msg) => (
-        <article className={`message ${msg.role}`} key={msg.id}>
-          <MarkdownText text={msg.content} />
-          {msg.prompt && (
-            <details>
-              <summary>Prompt</summary>
-              <pre>{msg.prompt}</pre>
-            </details>
-          )}
-        </article>
-      ))}
+      {visibleMessages.map((msg) => {
+        const referenceParts = msg.role === 'user' ? splitReferenceMarkdown(msg.content) : { text: msg.content, refs: [] }
+        return (
+          <article className={`message-turn ${msg.role}`} key={msg.id}>
+            <div className={`message ${msg.role}`}>
+              <MarkdownText text={referenceParts.text} />
+              {msg.prompt && (
+                <details>
+                  <summary>Prompt</summary>
+                  <pre>{msg.prompt}</pre>
+                </details>
+              )}
+            </div>
+            {referenceParts.refs.length > 0 && (
+              <div className="message-reference-strip">
+                {referenceParts.refs.map((ref, index) => (
+                  <button key={`${ref.url}-${index}`} type="button" onClick={() => setPreview(ref.url)} title={ref.alt || `参考图 ${index + 1}`}>
+                    <img src={ref.url} alt={ref.alt || `Reference ${index + 1}`} />
+                  </button>
+                ))}
+              </div>
+            )}
+          </article>
+        )
+      })}
       {(thinkingText || streamingText) && (
         <article className="message assistant streaming-message">
           {thinkingText && (
@@ -557,9 +622,11 @@ function Composer({
   setOptimisticMessages,
   pendingRequest,
   setPendingRequest,
+  conversationStarted,
 }: {
   sessionId: number | null
   assets: Asset[]
+  conversationStarted: boolean
   onChanged: () => void | Promise<void>
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
   setThinkingText: React.Dispatch<React.SetStateAction<string>>
@@ -586,21 +653,49 @@ function Composer({
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
   const [modalSettings, setModalSettings] = useState(settings)
-  const [moreOpen, setMoreOpen] = useState(false)
-  const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
+  const [assetGalleryOpen, setAssetGalleryOpen] = useState(false)
+  const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
+  const [libraryLoading, setLibraryLoading] = useState(false)
+  const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
-  const selectedAssets = visibleAssets.filter((asset) => selectedAssetIds.includes(asset.id))
-
-  function openMore() {
-    setMoreOpen((open) => !open)
-  }
+  const galleryAssets = useMemo(() => uniqueAssets([...visibleAssets, ...libraryAssets]), [visibleAssets, libraryAssets])
+  const selectedAssets = galleryAssets.filter((asset) => selectedAssetIds.includes(asset.id))
+  const composerCentered = !conversationStarted
 
   function chooseUploadFiles() {
-    setUploadDialogOpen(false)
-    setMoreOpen(false)
+    setAssetGalleryOpen(false)
+    setMobileToolsOpen(false)
     window.setTimeout(() => fileInputRef.current?.click(), 0)
   }
+
+  async function loadAssetGallery() {
+    setLibraryLoading(true)
+    try {
+      const res = await api.listAssets()
+      setLibraryAssets(res.assets ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '图库加载失败')
+    } finally {
+      setLibraryLoading(false)
+    }
+  }
+
+  function openAssetGallery() {
+    setAssetGalleryOpen((open) => !open)
+    if (!assetGalleryOpen) {
+      loadAssetGallery()
+    }
+  }
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`
+  }, [draft])
 
   async function requestGenerate(
     targetSessionId: number,
@@ -766,9 +861,10 @@ function Composer({
         if (file.type.startsWith('image/')) {
           const res = await api.uploadAsset(sessionId, file, uploadProvider)
           selectAsset(res.asset.id)
+          setLibraryAssets((items) => uniqueAssets([res.asset, ...items]))
         }
       }
-      await onChanged()
+      await Promise.all([onChanged(), loadAssetGallery()])
     } catch (err) {
       setError(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -776,14 +872,37 @@ function Composer({
     }
   }
 
+  async function useGalleryAsset(asset: Asset) {
+    if (!sessionId) return
+    setError('')
+    try {
+      if (asset.session_id === sessionId) {
+        toggleAsset(asset.id)
+        return
+      }
+      const res = await api.useAsset(sessionId, asset.id)
+      selectAsset(res.asset.id)
+      setLibraryAssets((items) => uniqueAssets([res.asset, ...items]))
+      await Promise.all([onChanged(), loadAssetGallery()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '挂载参考图失败')
+    }
+  }
+
   return (
     <>
-      <form className="composer" onSubmit={submit}>
+      <form className={`composer ${composerCentered ? 'centered' : 'docked'}`} onSubmit={submit}>
+        {composerCentered && (
+          <div className="composer-greeting">
+            <Sparkles size={22} />
+            <h2>今天想画点什么？</h2>
+          </div>
+        )}
         {selectedAssets.length > 0 && (
           <div className="selected-strip">
             {selectedAssets.map((asset, index) => (
               <span key={asset.id} title={asset.file_name}>
-                <img src={asset.url} alt={asset.file_name} />
+                <img src={assetImageSrc(asset)} alt={asset.file_name} />
                 图{index + 1}
                 <button type="button" className="selected-remove" onClick={() => deselectAsset(asset.id)} title="移除参考图">
                   <X size={13} />
@@ -805,8 +924,15 @@ function Composer({
             }}
           />
           <textarea
+            ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault()
+                event.currentTarget.form?.requestSubmit()
+              }
+            }}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
               if (files.length > 0) {
@@ -814,19 +940,33 @@ function Composer({
                 uploadFiles(files)
               }
             }}
-            placeholder="描述你想要的画面或修改。"
-            rows={3}
+            placeholder="今天想画点什么？"
+            rows={1}
           />
           <div className="composer-actions">
-            {moreOpen && (
-              <ComposerMorePopover
-                usePlanner={usePlanner}
-                setUsePlanner={setUsePlanner}
-                onUpload={() => setUploadDialogOpen(true)}
+            <button type="button" className="icon-button" onClick={openAssetGallery} title="参考图库">
+              {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
+            </button>
+            {assetGalleryOpen && (
+              <AssetGalleryPopover
+                assets={galleryAssets}
+                selectedAssetIds={selectedAssetIds}
+                uploadProvider={uploadProvider}
+                setUploadProvider={setUploadProvider}
+                uploading={uploading}
+                loading={libraryLoading}
+                onUpload={chooseUploadFiles}
+                onUse={useGalleryAsset}
+                onPreview={(asset) => setGalleryPreview(assetImageSrc(asset))}
+                onClose={() => setAssetGalleryOpen(false)}
               />
             )}
-            <button type="button" className="icon-button" onClick={openMore} title="更多">
-              {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
+            <label className="planner-switch" title="切换 AI Planner">
+              <span>AI Planner</span>
+              <input type="checkbox" checked={usePlanner} onChange={(event) => setUsePlanner(event.target.checked)} />
+            </label>
+            <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数">
+              <Settings2 size={18} />
             </button>
             <button className="send-button" disabled={busy || !sessionId} title="发送给 Planner">
               {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
@@ -835,7 +975,7 @@ function Composer({
         </div>
         {error && <p className="form-error">{error}</p>}
       </form>
-      {moreOpen && (
+      {mobileToolsOpen && (
         <MobileMoreDrawer
           assets={visibleAssets}
           selectedAssetIds={selectedAssetIds}
@@ -844,18 +984,15 @@ function Composer({
           setSettings={setSettings}
           usePlanner={usePlanner}
           setUsePlanner={setUsePlanner}
-          onClose={() => setMoreOpen(false)}
-          onUpload={() => setUploadDialogOpen(true)}
+          onClose={() => setMobileToolsOpen(false)}
+          onUpload={() => {
+            setMobileToolsOpen(false)
+            setAssetGalleryOpen(true)
+            loadAssetGallery()
+          }}
         />
       )}
-      {uploadDialogOpen && (
-        <UploadDestinationDialog
-          uploadProvider={uploadProvider}
-          setUploadProvider={setUploadProvider}
-          onClose={() => setUploadDialogOpen(false)}
-          onChoose={chooseUploadFiles}
-        />
-      )}
+      {galleryPreview && <ImageLightbox src={galleryPreview} onClose={() => setGalleryPreview(null)} />}
       {pendingRequest?.response.requires_confirmation && (
         <PlanConfirmDialog
           plan={pendingRequest.response.plan}
@@ -889,8 +1026,20 @@ function MarkdownText({ text }: { text: string }) {
 
 function withReferenceMarkdown(text: string, assets: Asset[]) {
   if (assets.length === 0) return text
-  const refs = assets.map((asset, index) => `![图${index + 1}](${asset.url})`).join(' ')
+  const refs = assets.map((asset, index) => `![图${index + 1}](${assetImageSrc(asset)})`).join(' ')
   return `${text}\n\n${refs}`
+}
+
+function splitReferenceMarkdown(text: string) {
+  const refs: { alt: string; url: string }[] = []
+  const cleaned = text
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, alt: string, url: string) => {
+      refs.push({ alt, url })
+      return ''
+    })
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+  return { text: cleaned || text, refs }
 }
 
 function ComposerMorePopover({
@@ -992,7 +1141,7 @@ function MobileMoreDrawer({
                       title={asset.file_name}
                       type="button"
                     >
-                      <img src={asset.url} alt={asset.file_name} />
+                      <img src={assetImageSrc(asset)} alt={asset.file_name} />
                     </button>
                   ))}
                 </div>
@@ -1094,6 +1243,68 @@ function UploadDestinationDialog({
           </div>
         </div>
       </section>
+    </div>
+  )
+}
+
+function AssetGalleryPopover({
+  assets,
+  selectedAssetIds,
+  uploadProvider,
+  setUploadProvider,
+  uploading,
+  loading,
+  onUpload,
+  onUse,
+  onPreview,
+  onClose,
+}: {
+  assets: Asset[]
+  selectedAssetIds: number[]
+  uploadProvider: string
+  setUploadProvider: (provider: string) => void
+  uploading: boolean
+  loading: boolean
+  onUpload: () => void
+  onUse: (asset: Asset) => void | Promise<void>
+  onPreview: (asset: Asset) => void
+  onClose: () => void
+}) {
+  return (
+    <div className="asset-gallery-popover" onClick={(event) => event.stopPropagation()}>
+      <div className="asset-gallery-head">
+        <strong>参考图库</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭">
+          <X size={16} />
+        </button>
+      </div>
+      <label className="asset-gallery-provider">
+        上传到
+        <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
+          <option value="evolink">Evolink</option>
+          <option value="maxqi">MaxQi</option>
+        </select>
+      </label>
+      <div className="asset-gallery-grid">
+        <button type="button" className="asset-upload-tile" onClick={onUpload} title="从本地上传参考图">
+          {uploading ? <Loader2 className="spin" size={22} /> : <ImagePlus size={22} />}
+        </button>
+        {assets.map((asset) => (
+          <div key={asset.id} className={`asset-tile compact ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} title={asset.file_name}>
+            <img src={assetImageSrc(asset)} alt={asset.file_name} />
+            <button className="asset-use" type="button" onClick={() => onUse(asset)} title="使用这张参考图">
+              {selectedAssetIds.includes(asset.id) ? '已使用' : '使用'}
+            </button>
+            <button className="asset-preview-hit" type="button" onClick={() => onPreview(asset)} title="预览图片" />
+          </div>
+        ))}
+        {loading && (
+          <div className="asset-gallery-loading">
+            <Loader2 className="spin" size={18} />
+          </div>
+        )}
+      </div>
+      {!loading && assets.length === 0 && <p className="empty-note">还没有参考图</p>}
     </div>
   )
 }
@@ -1264,7 +1475,7 @@ function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null;
             className={`asset-tile ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`}
             title={asset.file_name}
           >
-            <img src={asset.url} alt={asset.file_name} />
+            <img src={assetImageSrc(asset)} alt={asset.file_name} />
             <span className="asset-provider-badge">{providerLabel(asset)}</span>
             <button className="asset-use" type="button" onClick={() => toggleAsset(asset.id)} title="使用这张参考图">
               {selectedAssetIds.includes(asset.id) ? '已使用' : '使用'}
@@ -1308,8 +1519,11 @@ function UserCenter({
   const [tab, setTab] = useState<'overview' | 'sessions' | 'assets'>('overview')
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const selectAsset = useAppStore((s) => s.selectAsset)
   const deselectAsset = useAppStore((s) => s.deselectAsset)
+  const uploadProvider = useAppStore((s) => s.uploadProvider)
   const locale = useAppStore((s) => s.locale)
 
   async function loadSessions() {
@@ -1356,6 +1570,28 @@ function UserCenter({
       await Promise.all([loadUsage(), onSessionsChanged()])
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
+  async function uploadLibraryAssets(files: FileList | null) {
+    if (!activeSessionId || !files?.length) {
+      setError('请先选择一个当前对话再上传参考图')
+      return
+    }
+    setUploading(true)
+    setError('')
+    try {
+      for (const file of Array.from(files)) {
+        if (file.type.startsWith('image/')) {
+          const res = await api.uploadAsset(activeSessionId, file, uploadProvider)
+          selectAsset(res.asset.id)
+        }
+      }
+      await Promise.all([loadUsage(), onSessionsChanged()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '上传失败')
+    } finally {
+      setUploading(false)
     }
   }
 
@@ -1444,11 +1680,27 @@ function UserCenter({
           )}
           {tab === 'assets' && (
             <section className="panel-block">
-              <h3>参考图</h3>
+              <div className="panel-title-row">
+                <h3>参考图</h3>
+                <button type="button" className="icon-button" onClick={() => fileInputRef.current?.click()} title="上传参考图">
+                  {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  className="hidden-file"
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={(event) => {
+                    uploadLibraryAssets(event.target.files)
+                    event.currentTarget.value = ''
+                  }}
+                />
+              </div>
               <div className="asset-grid library">
                 {uniqueAssets(data.assets ?? []).map((asset) => (
                   <div key={asset.id} className="asset-tile" title={asset.file_name}>
-                    <img src={asset.url} alt={asset.file_name} />
+                    <img src={assetImageSrc(asset)} alt={asset.file_name} />
                     <span className="asset-provider-badge">{providerLabel(asset)}</span>
                     <button className="asset-use" type="button" onClick={() => useLibraryAsset(asset)} title="使用这张参考图">
                       使用
@@ -1456,7 +1708,7 @@ function UserCenter({
                     <button className="asset-delete" type="button" onClick={() => deleteLibraryAsset(asset)} title="移除参考图">
                       <X size={14} />
                     </button>
-                    <button className="asset-preview-hit" type="button" onClick={() => setPreview(asset.url)} title="预览图片" />
+                    <button className="asset-preview-hit" type="button" onClick={() => setPreview(assetImageSrc(asset))} title="预览图片" />
                   </div>
                 ))}
               </div>
@@ -1556,6 +1808,10 @@ function uniqueAssets(assets: Asset[]) {
     seen.add(key)
     return true
   })
+}
+
+function assetImageSrc(asset: Asset) {
+  return asset.local_url || asset.url
 }
 
 function providerLabel(asset: Asset) {
