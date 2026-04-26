@@ -11,7 +11,6 @@ import {
   CreditCard,
   ImagePlus,
   Images,
-  Info,
   KeyRound,
   Languages,
   Lock,
@@ -21,25 +20,25 @@ import {
   MessageSquarePlus,
   Moon,
   PanelLeft,
-  PanelRight,
   Pencil,
+  Search,
   Send,
   Settings2,
   Shield,
   Sparkles,
   Sun,
   RotateCcw,
+  SlidersHorizontal,
   Trash2,
   UserRound,
   Wand2,
   X,
 } from 'lucide-react'
 import { api } from './lib/api'
-import { useAppStore } from './store/appStore'
+import { useAppStore, type Page } from './store/appStore'
 import type { Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageResponse, User } from './types/api'
 import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from './i18n'
 
-type Overlay = 'account' | 'admin' | null
 type PendingRequest = {
   sessionId: number
   response: GenerateResponse
@@ -63,92 +62,39 @@ export function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
-  if (!token) {
-    return <AuthScreen />
-  }
+  if (!token) return <AuthScreen />
   return <Workspace />
 }
 
-function AuthScreen() {
-  const setAuth = useAppStore((s) => s.setAuth)
-  const toggleTheme = useAppStore((s) => s.toggleTheme)
-  const theme = useAppStore((s) => s.theme)
-  const [mode, setMode] = useState<'login' | 'register'>('register')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [displayName, setDisplayName] = useState('')
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
+// ── Command parsing for Midjourney-style params ──
 
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError('')
-    try {
-      const res =
-        mode === 'register'
-          ? await api.register({ email, password, display_name: displayName })
-          : await api.login({ email, password })
-      setAuth(res.token, res.user)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '请求失败')
-    } finally {
-      setBusy(false)
+const COMMAND_PATTERNS: Record<string, RegExp> = {
+  size: /--(?:ar|size)\s+([\w:]+)/i,
+  resolution: /--(?:res|resolution)\s+(\w+)/i,
+  quality: /--(?:q|quality)\s+(\w+)/i,
+  count: /--(?:n|count)\s+(\d+)/i,
+}
+
+function parseCommands(text: string): { cleanText: string; overrides: Partial<GenerationSettingsValue> } {
+  let cleanText = text
+  const overrides: Partial<GenerationSettingsValue> = {}
+  for (const [key, pattern] of Object.entries(COMMAND_PATTERNS)) {
+    const match = cleanText.match(pattern)
+    if (match) {
+      cleanText = cleanText.replace(match[0], '').trim()
+      if (key === 'count') overrides.count = Math.min(4, Math.max(1, Number(match[1])))
+      else if (key === 'quality') {
+        const q = match[1].toLowerCase()
+        if (['low', 'medium', 'high'].includes(q)) overrides.quality = q
+        else if (q === 'l') overrides.quality = 'low'
+        else if (q === 'm') overrides.quality = 'medium'
+        else if (q === 'h') overrides.quality = 'high'
+      } else {
+        (overrides as Record<string, string>)[key] = match[1]
+      }
     }
   }
-
-  return (
-    <main className="auth-shell">
-      <button className="icon-button theme-float" onClick={toggleTheme} title="切换明暗模式">
-        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-      </button>
-      <section className="auth-copy">
-        <div className="brand-mark">
-          <Sparkles size={18} />
-          <span>PicTu</span>
-        </div>
-        <h1>艺术灵感从这开始</h1>
-        <p>AI 图像会话工作台</p>
-      </section>
-
-      <form className="auth-card flat-panel" onSubmit={submit}>
-        <div className="tabs">
-          <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>
-            注册
-          </button>
-          <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>
-            登录
-          </button>
-        </div>
-        {mode === 'register' && (
-          <label>
-            名称
-            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="工作室名称" />
-          </label>
-        )}
-        <label>
-          邮箱
-          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" />
-        </label>
-        <label>
-          密码
-          <input
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            type="password"
-            required
-            minLength={8}
-            placeholder="至少 8 位"
-          />
-        </label>
-        {error && <p className="form-error">{error}</p>}
-        <button className="primary-button" disabled={busy}>
-          {busy ? <Loader2 className="spin" size={17} /> : <Wand2 size={17} />}
-          {mode === 'register' ? '创建账户' : '进入'}
-        </button>
-      </form>
-    </main>
-  )
+  return { cleanText, overrides }
 }
 
 function Workspace() {
@@ -161,10 +107,11 @@ function Workspace() {
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const locale = useAppStore((s) => s.locale)
   const setLocale = useAppStore((s) => s.setLocale)
+  const page = useAppStore((s) => s.page)
+  const setPage = useAppStore((s) => s.setPage)
   const [sessions, setSessions] = useState<Session[]>([])
   const [detail, setDetail] = useState<SessionDetail | null>(null)
   const [mobilePanel, setMobilePanel] = useState(false)
-  const [overlay, setOverlay] = useState<Overlay>(null)
   const [error, setError] = useState('')
   const [streamingText, setStreamingText] = useState('')
   const [thinkingText, setThinkingText] = useState('')
@@ -174,14 +121,13 @@ function Workspace() {
   const [completedNotices, setCompletedNotices] = useState<Record<number, boolean>>({})
   const [toolDraft, setToolDraft] = useState<ToolDraft | null>(null)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
-  const [rightCollapsed, setRightCollapsed] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
 
   async function refreshSessions() {
     const res = await api.listSessions()
     const items = res.sessions ?? []
     setSessions((previous) => {
-      const previousByID = new Map(previous.map((session) => [session.id, session.task_status]))
+      const previousByID = new Map(previous.map((s) => [s.id, s.task_status]))
       const newNotices: Record<number, boolean> = {}
       for (const item of items) {
         const before = previousByID.get(item.id)
@@ -190,13 +136,13 @@ function Workspace() {
         }
       }
       if (Object.keys(newNotices).length > 0) {
-        setCompletedNotices((current) => ({ ...current, ...newNotices }))
+        setCompletedNotices((c) => ({ ...c, ...newNotices }))
       }
       return items
     })
     if (!activeSessionId && items[0]) {
       setActiveSessionId(items[0].id)
-    } else if (activeSessionId && !items.some((item) => item.id === activeSessionId)) {
+    } else if (activeSessionId && !items.some((i) => i.id === activeSessionId)) {
       setActiveSessionId(items[0]?.id ?? null)
       if (!items[0]) setDetail(null)
     }
@@ -218,23 +164,24 @@ function Workspace() {
 
   async function createSession() {
     const res = await api.createSession('未命名会话')
-    const nextSessions = await api.listSessions().then((list) => list.sessions ?? []).catch(() => [res.session])
+    const nextSessions = await api.listSessions().then((l) => l.sessions ?? []).catch(() => [res.session])
     setSessions(nextSessions)
     setActiveSessionId(res.session.id)
     setDetail({ session: res.session, assets: [], messages: [], tasks: [] })
     setMobilePanel(false)
+    setPage('workspace')
   }
 
   async function renameSession(title: string) {
     if (!activeSessionId) return
     const res = await api.updateSession(activeSessionId, title)
-    setDetail((current) => (current ? { ...current, session: res.session } : current))
-    setSessions((items) => items.map((item) => (item.id === res.session.id ? res.session : item)))
+    setDetail((c) => (c ? { ...c, session: res.session } : c))
+    setSessions((items) => items.map((i) => (i.id === res.session.id ? res.session : i)))
   }
 
   async function archiveSession(id: number) {
     await api.archiveSession(id)
-    const nextSessions = await api.listSessions().then((res) => res.sessions ?? [])
+    const nextSessions = await api.listSessions().then((r) => r.sessions ?? [])
     setSessions(nextSessions)
     if (id === activeSessionId) {
       const next = nextSessions[0]
@@ -244,18 +191,16 @@ function Workspace() {
   }
 
   useEffect(() => {
-    api.me()
-      .then((res) => setUser(res.user))
-      .catch(() => clearAuth())
+    api.me().then((res) => setUser(res.user)).catch(() => clearAuth())
     refreshSessions().catch((err) => setError(err.message))
   }, [])
 
   useEffect(() => {
-    refreshDetail().catch((err) => setError(err.message))
-  }, [activeSessionId])
+    if (page === 'workspace') refreshDetail().catch((err) => setError(err.message))
+  }, [activeSessionId, page])
 
   useEffect(() => {
-    const running = (detail?.tasks ?? []).some((task) => task.status === 'pending' || task.status === 'processing')
+    const running = (detail?.tasks ?? []).some((t) => t.status === 'pending' || t.status === 'processing')
     if (!running || !activeSessionId) return
     const timer = window.setInterval(() => {
       refreshDetail().catch(() => undefined)
@@ -265,11 +210,9 @@ function Workspace() {
   }, [detail?.tasks, activeSessionId])
 
   useEffect(() => {
-    const hasRunningSession = sessions.some((session) => session.task_status === 'pending' || session.task_status === 'processing')
-    if (!hasRunningSession) return
-    const timer = window.setInterval(() => {
-      refreshSessions().catch(() => undefined)
-    }, 5000)
+    const hasRunning = sessions.some((s) => s.task_status === 'pending' || s.task_status === 'processing')
+    if (!hasRunning) return
+    const timer = window.setInterval(() => { refreshSessions().catch(() => undefined) }, 5000)
     return () => window.clearInterval(timer)
   }, [sessions])
 
@@ -291,163 +234,114 @@ function Workspace() {
   const visibleThinkingText = streamingSessionId === activeSessionId ? thinkingText : ''
   const visibleToolDraft = toolDraft?.sessionId === activeSessionId ? toolDraft : null
   const visibleOptimisticMessages = activeSessionId ? optimisticMessages[activeSessionId] ?? [] : []
-  const conversationStarted =
-    messages.length > 0 ||
-    visibleOptimisticMessages.length > 0 ||
-    tasks.length > 0 ||
-    Boolean(visibleStreamingText || visibleThinkingText || visibleToolDraft)
+  const conversationStarted = messages.length > 0 || visibleOptimisticMessages.length > 0 || tasks.length > 0 || Boolean(visibleStreamingText || visibleThinkingText || visibleToolDraft)
+
+  function selectSession(id: number) {
+    setActiveSessionId(id)
+    if (sessions.find((s) => s.id === id)?.task_status === 'completed') {
+      setCompletedNotices((c) => ({ ...c, [id]: false }))
+    }
+    setMobilePanel(false)
+    setPage('workspace')
+  }
 
   return (
-    <main className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''} ${rightCollapsed ? 'right-collapsed' : ''}`}>
-      {mobilePanel && <button className="mobile-panel-scrim" aria-label="关闭会话列表" onClick={() => setMobilePanel(false)} />}
-      <aside className={`session-panel ${mobilePanel ? 'open' : ''} ${leftCollapsed ? 'collapsed' : ''}`}>
-        {leftCollapsed ? (
-          <div className="collapsed-rail left-rail">
-            <div className="rail-top">
-              <button className="rail-button" onClick={() => setLeftCollapsed(false)} title="展开会话栏">
-                <PanelLeft size={18} />
-              </button>
-              <button className="rail-button" onClick={createSession} title="新建会话">
-                <MessageSquarePlus size={18} />
-              </button>
-              <button className="rail-button" onClick={toggleTheme} title="切换明暗模式">
-                {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-              </button>
-            </div>
-            <div className="rail-bottom">
-              <button className="rail-button avatar-rail-button" onClick={() => setOverlay('account')} title="设置中心">
-                <UserAvatar user={user} size="small" />
-              </button>
-            </div>
-          </div>
-        ) : (
-          <>
-        <div className="panel-head">
-          <div className="brand-mark compact">
-            <Sparkles size={16} />
-            <span>PicTu</span>
-          </div>
-          <div className="panel-actions">
-            <button className="icon-button" onClick={() => setLeftCollapsed(true)} title="折叠会话栏">
-              <PanelLeft size={18} />
-            </button>
-            <button className="icon-button" onClick={createSession} title="新建会话">
-              <MessageSquarePlus size={18} />
-            </button>
-          </div>
+    <main className={`app-shell ${leftCollapsed ? 'left-collapsed' : ''}`}>
+      {mobilePanel && <button className="mobile-panel-scrim" aria-label="关闭" onClick={() => setMobilePanel(false)} />}
+
+      <aside className={`sidebar ${mobilePanel ? 'open' : ''} ${leftCollapsed ? 'collapsed' : ''}`}>
+        <div className="sidebar-brand">
+          {!leftCollapsed && <div className="brand-mark"><Sparkles size={16} /><span>PicTu</span></div>}
+          <button className="icon-button" onClick={() => setLeftCollapsed(!leftCollapsed)} title={leftCollapsed ? '展开' : '折叠'}>
+            <PanelLeft size={18} />
+          </button>
         </div>
 
-        <nav className="session-list">
-          {sessions.map((session) => (
-            <div key={session.id} className={`session-row ${session.id === activeSessionId ? 'active' : ''}`}>
-              <button
-                className="session-select"
-                onClick={() => {
-                  setActiveSessionId(session.id)
-                  if (session.task_status === 'completed') {
-                    setCompletedNotices((items) => ({ ...items, [session.id]: false }))
-                  }
-                  setMobilePanel(false)
-                }}
-                title={session.title}
-              >
-                <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
-                <span className="session-title">{session.title}</span>
-              </button>
-              <button className="session-archive" title="归档对话" onClick={() => archiveSession(session.id).catch((err) => setError(err.message))}>
-                <Archive size={15} />
-              </button>
-            </div>
-          ))}
+        <nav className="sidebar-nav">
+          <button className="nav-item" onClick={createSession} title="新建对话">
+            <MessageSquarePlus size={18} />{!leftCollapsed && <span>新建对话</span>}
+          </button>
+          <button className="nav-item" onClick={() => setPage('chats')} title="搜索对话">
+            <Search size={18} />{!leftCollapsed && <span>搜索</span>}
+          </button>
+          <button className={`nav-item ${page === 'gallery' ? 'active' : ''}`} onClick={() => setPage('gallery')} title="画廊">
+            <Images size={18} />{!leftCollapsed && <span>画廊</span>}
+          </button>
         </nav>
+
+        {!leftCollapsed && (
+          <div className="session-list">
+            <div className="session-list-label">最近</div>
+            {sessions.map((session) => (
+              <div key={session.id} className={`session-row ${session.id === activeSessionId && page === 'workspace' ? 'active' : ''}`}>
+                <button className="session-select" onClick={() => selectSession(session.id)} title={session.title}>
+                  <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
+                  <span className="session-title">{session.title}</span>
+                </button>
+                <button className="session-archive" title="归档" onClick={() => archiveSession(session.id).catch((e) => setError(e.message))}>
+                  <Archive size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="sidebar-foot">
           <UserDock
             user={user}
             open={userMenuOpen}
-            theme={theme}
-            locale={locale}
-            onToggleOpen={() => setUserMenuOpen((open) => !open)}
-            onOpenSettings={() => {
-              setOverlay('account')
-              setUserMenuOpen(false)
-            }}
-            onOpenAdmin={() => {
-              setOverlay('admin')
-              setUserMenuOpen(false)
-            }}
-            onToggleTheme={toggleTheme}
-            onToggleLocale={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}
+            collapsed={leftCollapsed}
+            onToggleOpen={() => setUserMenuOpen((o) => !o)}
+            onOpenSettings={() => { setPage('settings'); setUserMenuOpen(false) }}
+            onOpenAdmin={() => { setPage('admin'); setUserMenuOpen(false) }}
             onLogout={clearAuth}
           />
         </div>
-          </>
-        )}
       </aside>
 
-      <section className="chat-panel">
-        <header className="topbar">
-          <button className="icon-button mobile-only" onClick={() => setMobilePanel(true)} title="会话列表">
-            <PanelLeft size={18} />
-          </button>
-          <EditableTitle title={detail?.session.title ?? '未命名会话'} onSave={renameSession} />
-          <button className="icon-button" title="参数与参考图在右侧面板，移动端位于底部">
-            <Info size={18} />
-          </button>
-        </header>
-        {error && <p className="inline-error">{error}</p>}
-        <MessageStream
-          messages={[...messages, ...visibleOptimisticMessages]}
-          tasks={tasks}
-          streamingText={visibleStreamingText}
-          thinkingText={visibleThinkingText}
-          toolDraft={visibleToolDraft}
-          locale={locale}
-        />
-        <Composer
-          sessionId={activeSessionId}
-          assets={assets}
-          conversationStarted={conversationStarted}
-          onChanged={async () => {
-            await refreshWorkspace()
-            if (activeSessionId) {
-              setOptimisticMessages((items) => ({ ...items, [activeSessionId]: [] }))
-            }
-          }}
-          setStreamingText={setStreamingText}
-          setThinkingText={setThinkingText}
-          setStreamingSessionId={setStreamingSessionId}
-          setToolDraft={setToolDraft}
-          setOptimisticMessages={setOptimisticMessages}
-          pendingRequest={pendingRequest?.sessionId === activeSessionId ? pendingRequest : null}
-          setPendingRequest={setPendingRequest}
-        />
-      </section>
+      {page === 'workspace' && (
+        <section className="chat-panel">
+          <header className="topbar">
+            <button className="icon-button mobile-only" onClick={() => setMobilePanel(true)} title="菜单"><PanelLeft size={18} /></button>
+            <EditableTitle title={detail?.session.title ?? '未命名会话'} onSave={renameSession} />
+          </header>
+          {error && <p className="inline-error">{error}</p>}
+          <MessageStream
+            messages={[...messages, ...visibleOptimisticMessages]}
+            tasks={tasks}
+            streamingText={visibleStreamingText}
+            thinkingText={visibleThinkingText}
+            toolDraft={visibleToolDraft}
+            locale={locale}
+          />
+          <Composer
+            sessionId={activeSessionId}
+            assets={assets}
+            conversationStarted={conversationStarted}
+            onChanged={async () => {
+              await refreshWorkspace()
+              if (activeSessionId) setOptimisticMessages((i) => ({ ...i, [activeSessionId]: [] }))
+            }}
+            setStreamingText={setStreamingText}
+            setThinkingText={setThinkingText}
+            setStreamingSessionId={setStreamingSessionId}
+            setToolDraft={setToolDraft}
+            setOptimisticMessages={setOptimisticMessages}
+            pendingRequest={pendingRequest?.sessionId === activeSessionId ? pendingRequest : null}
+            setPendingRequest={setPendingRequest}
+          />
+        </section>
+      )}
 
-      <aside className={`asset-panel ${rightCollapsed ? 'collapsed' : ''}`}>
-        {rightCollapsed ? (
-          <button className="right-edge-toggle" onClick={() => setRightCollapsed(false)} title="展开参数栏">
-            <PanelRight size={18} />
-          </button>
-        ) : (
-          <>
-            <div className="asset-panel-head">
-              <span>工具</span>
-              <button className="icon-button" onClick={() => setRightCollapsed(true)} title="折叠参数栏">
-                <PanelRight size={18} />
-              </button>
-            </div>
-            <AssetRack sessionId={activeSessionId} assets={assets} onChanged={() => refreshWorkspace()} />
-            <GenerationSettings />
-          </>
-        )}
-      </aside>
-
-      {overlay === 'account' && <UserCenter activeSessionId={activeSessionId} onClose={() => setOverlay(null)} onSessionsChanged={refreshWorkspace} />}
-      {overlay === 'admin' && user?.role === 'admin' && <AdminPanel onClose={() => setOverlay(null)} />}
+      {page === 'gallery' && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} />}
+      {page === 'chats' && <ChatsPage sessions={sessions} onSelect={selectSession} onArchive={archiveSession} onRefresh={refreshSessions} />}
+      {page === 'settings' && <SettingsPage />}
+      {page === 'admin' && user?.role === 'admin' && <AdminPage />}
     </main>
   )
 }
+
+// ── Small components ──
 
 function SessionDot({ session, hasRequest, completedNotice }: { session: Session; hasRequest: boolean; completedNotice?: boolean }) {
   let cls = ''
@@ -458,17 +352,14 @@ function SessionDot({ session, hasRequest, completedNotice }: { session: Session
   return <span className={`session-dot ${cls}`} />
 }
 
-function EditableTitle({ title, onSave }: { title: string; onSave: (title: string) => Promise<void> }) {
+function EditableTitle({ title, onSave }: { title: string; onSave: (t: string) => Promise<void> }) {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(title)
-
   useEffect(() => setValue(title), [title])
 
   async function save() {
     const trimmed = value.trim()
-    if (trimmed && trimmed !== title) {
-      await onSave(trimmed)
-    }
+    if (trimmed && trimmed !== title) await onSave(trimmed)
     setEditing(false)
   }
 
@@ -476,12 +367,8 @@ function EditableTitle({ title, onSave }: { title: string; onSave: (title: strin
     return (
       <div className="title-editor">
         <input value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && save()} autoFocus />
-        <button className="icon-button" onClick={save} title="保存名称">
-          <Check size={17} />
-        </button>
-        <button className="icon-button" onClick={() => setEditing(false)} title="取消">
-          <X size={17} />
-        </button>
+        <button className="icon-button" onClick={save} title="保存"><Check size={17} /></button>
+        <button className="icon-button" onClick={() => setEditing(false)} title="取消"><X size={17} /></button>
       </div>
     )
   }
@@ -489,9 +376,7 @@ function EditableTitle({ title, onSave }: { title: string; onSave: (title: strin
   return (
     <div className="title-line" title={title}>
       <h1>{title}</h1>
-      <button className="icon-button quiet" onClick={() => setEditing(true)} title="修改会话名称">
-        <Pencil size={16} />
-      </button>
+      <button className="icon-button quiet" onClick={() => setEditing(true)} title="修改名称"><Pencil size={16} /></button>
     </div>
   )
 }
@@ -505,80 +390,32 @@ function UserAvatar({ user, size = 'regular' }: { user: User | null; size?: 'sma
   )
 }
 
-function UserDock({
-  user,
-  open,
-  theme,
-  locale,
-  onToggleOpen,
-  onOpenSettings,
-  onOpenAdmin,
-  onToggleTheme,
-  onToggleLocale,
-  onLogout,
-}: {
-  user: User | null
-  open: boolean
-  theme: 'light' | 'dark'
-  locale: Locale
-  onToggleOpen: () => void
-  onOpenSettings: () => void
-  onOpenAdmin: () => void
-  onToggleTheme: () => void
-  onToggleLocale: () => void
-  onLogout: () => void
+function UserDock({ user, open, collapsed, onToggleOpen, onOpenSettings, onOpenAdmin, onLogout }: {
+  user: User | null; open: boolean; collapsed: boolean
+  onToggleOpen: () => void; onOpenSettings: () => void; onOpenAdmin: () => void; onLogout: () => void
 }) {
   return (
     <div className="user-dock">
       {open && (
         <div className="user-menu">
-          <button type="button" onClick={onOpenSettings}>
-            <Settings2 size={17} />
-            <span>设置中心</span>
-          </button>
-          <button type="button" onClick={onToggleTheme}>
-            {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-            <span>{theme === 'dark' ? '切换日间模式' : '切换夜间模式'}</span>
-          </button>
-          <button type="button" onClick={onToggleLocale}>
-            <Languages size={17} />
-            <span>{locale === 'zh-CN' ? 'Switch to English' : '切换中文'}</span>
-          </button>
-          {user?.role === 'admin' && (
-            <button type="button" onClick={onOpenAdmin}>
-              <Shield size={17} />
-              <span>管理员模式</span>
-            </button>
-          )}
-          <button type="button" className="danger-menu-item" onClick={onLogout}>
-            <LogOut size={17} />
-            <span>退出登录</span>
-          </button>
+          <button type="button" onClick={onOpenSettings}><Settings2 size={16} /><span>设置</span></button>
+          {user?.role === 'admin' && <button type="button" onClick={onOpenAdmin}><Shield size={16} /><span>管理</span></button>}
+          <button type="button" className="danger-menu-item" onClick={onLogout}><LogOut size={16} /><span>退出</span></button>
         </div>
       )}
-      <button type="button" className="user-dock-trigger" onClick={onToggleOpen} aria-expanded={open} title="账户菜单">
-        <UserAvatar user={user} />
-        <span>{userDisplayName(user)}</span>
-        {open ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+      <button type="button" className="user-dock-trigger" onClick={onToggleOpen} aria-expanded={open} title="账户">
+        <UserAvatar user={user} size="small" />
+        {!collapsed && <span>{userDisplayName(user)}</span>}
+        {!collapsed && (open ? <ChevronDown size={16} /> : <ChevronUp size={16} />)}
       </button>
     </div>
   )
 }
 
-function MessageStream({
-  messages,
-  tasks,
-  streamingText,
-  thinkingText,
-  toolDraft,
-  locale,
-}: {
-  messages: Message[]
-  tasks: Task[]
-  streamingText: string
-  thinkingText: string
-  toolDraft: ToolDraft | null
-  locale: Locale
+// ── MessageStream ──
+
+function MessageStream({ messages, tasks, streamingText, thinkingText, toolDraft, locale }: {
+  messages: Message[]; tasks: Task[]; streamingText: string; thinkingText: string; toolDraft: ToolDraft | null; locale: Locale
 }) {
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
@@ -612,18 +449,13 @@ function MessageStream({
           <article className={`message-turn ${msg.role}`} key={msg.id}>
             <div className={`message ${msg.role}`}>
               <MarkdownText text={referenceParts.text} />
-              {msg.prompt && (
-                <details>
-                  <summary>Prompt</summary>
-                  <pre>{msg.prompt}</pre>
-                </details>
-              )}
+              {msg.prompt && <details><summary>Prompt</summary><pre>{msg.prompt}</pre></details>}
             </div>
             {referenceParts.refs.length > 0 && (
               <div className="message-reference-strip">
-                {referenceParts.refs.map((ref, index) => (
-                  <button key={`${ref.url}-${index}`} type="button" onClick={() => setPreview(ref.url)} title={ref.alt || `参考图 ${index + 1}`}>
-                    <img src={ref.url} alt={ref.alt || `Reference ${index + 1}`} />
+                {referenceParts.refs.map((ref, i) => (
+                  <button key={`${ref.url}-${i}`} type="button" onClick={() => setPreview(ref.url)} title={ref.alt || `参考图 ${i + 1}`}>
+                    <img src={ref.url} alt={ref.alt || `Reference ${i + 1}`} />
                   </button>
                 ))}
               </div>
@@ -633,49 +465,29 @@ function MessageStream({
       })}
       {(thinkingText || streamingText) && (
         <article className="message assistant streaming-message">
-          {thinkingText && (
-            <details>
-              <summary>思考</summary>
-              <pre>{thinkingText}</pre>
-            </details>
-          )}
+          {thinkingText && <details><summary>思考</summary><pre>{thinkingText}</pre></details>}
           {streamingText && <MarkdownText text={streamingText} />}
         </article>
       )}
       {toolDraft && (
         <article className="task-card tool-draft-card">
-          <div className="task-meta">
-            <span>{translate(locale, `tool.${toolDraft.phase}`)}</span>
-            <Loader2 className="spin" size={16} />
-          </div>
-          {toolDraft.prompt && (
-            <details open>
-              <summary>{translate(locale, 'tool.prompt')}</summary>
-              <pre>{toolDraft.prompt}</pre>
-            </details>
-          )}
+          <div className="task-meta"><span>{translate(locale, `tool.${toolDraft.phase}`)}</span><Loader2 className="spin" size={16} /></div>
+          {toolDraft.prompt && <details open><summary>{translate(locale, 'tool.prompt')}</summary><pre>{toolDraft.prompt}</pre></details>}
         </article>
       )}
       {latestTask && (
         <article className="task-card">
           {latestTask.status !== 'completed' && (
             <>
-              <div className="task-meta">
-                <span>{localizeStatus(locale, latestTask.status)}</span>
-                <strong>{latestTask.progress}%</strong>
-              </div>
-              <div className="progress">
-                <span style={{ width: `${Math.max(latestTask.progress, 8)}%` }} />
-              </div>
+              <div className="task-meta"><span>{localizeStatus(locale, latestTask.status)}</span><strong>{latestTask.progress}%</strong></div>
+              <div className="progress"><span style={{ width: `${Math.max(latestTask.progress, 8)}%` }} /></div>
             </>
           )}
           {latestTask.error && <p className="form-error">{latestTask.error}</p>}
           {resultImages.length > 0 && (
             <div className="result-grid">
               {resultImages.map((url) => (
-                <button key={url} onClick={() => setPreview(url)} title="预览图片">
-                  <img src={url} alt="Generated result" />
-                </button>
+                <button key={url} onClick={() => setPreview(url)} title="预览"><img src={url} alt="Generated" /></button>
               ))}
             </div>
           )}
@@ -687,22 +499,10 @@ function MessageStream({
   )
 }
 
-function Composer({
-  sessionId,
-  assets,
-  onChanged,
-  setStreamingText,
-  setThinkingText,
-  setStreamingSessionId,
-  setToolDraft,
-  setOptimisticMessages,
-  pendingRequest,
-  setPendingRequest,
-  conversationStarted,
-}: {
-  sessionId: number | null
-  assets: Asset[]
-  conversationStarted: boolean
+// ── Composer ──
+
+function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingText, setStreamingSessionId, setToolDraft, setOptimisticMessages, pendingRequest, setPendingRequest, conversationStarted }: {
+  sessionId: number | null; assets: Asset[]; conversationStarted: boolean
   onChanged: () => void | Promise<void>
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
   setThinkingText: React.Dispatch<React.SetStateAction<string>>
@@ -729,19 +529,22 @@ function Composer({
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
-  const [modalSettings, setModalSettings] = useState(settings)
-  const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [assetGalleryOpen, setAssetGalleryOpen] = useState(false)
   const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
   const galleryAssets = useMemo(() => uniqueAssets([...visibleAssets, ...libraryAssets]), [visibleAssets, libraryAssets])
-  const selectedAssets = galleryAssets.filter((asset) => selectedAssetIds.includes(asset.id))
+  const selectedAssets = galleryAssets.filter((a) => selectedAssetIds.includes(a.id))
   const composerCentered = !conversationStarted
   const greeting = useMemo(() => buildComposerGreeting(user), [user?.display_name, user?.email])
+
+  const parsedCommands = useMemo(() => parseCommands(draft), [draft])
+  const hasCommandOverrides = Object.keys(parsedCommands.overrides).length > 0
 
   function chooseUploadFiles() {
     setAssetGalleryOpen(false)
@@ -762,10 +565,9 @@ function Composer({
   }
 
   function openAssetGallery() {
-    setAssetGalleryOpen((open) => !open)
-    if (!assetGalleryOpen) {
-      loadAssetGallery()
-    }
+    setAssetGalleryOpen((o) => !o)
+    setSettingsOpen(false)
+    if (!assetGalleryOpen) loadAssetGallery()
   }
 
   useEffect(() => {
@@ -776,10 +578,7 @@ function Composer({
   }, [draft])
 
   async function requestGenerate(
-    targetSessionId: number,
-    message: string,
-    assetIds: number[],
-    baseSettings: typeof settings,
+    targetSessionId: number, message: string, assetIds: number[], baseSettings: typeof settings,
     extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string },
   ) {
     if (!message.trim()) return
@@ -790,27 +589,12 @@ function Composer({
         setStreamingSessionId(targetSessionId)
         setToolDraft({ sessionId: targetSessionId, phase: 'calling', prompt: extra.prompt, raw: '' })
       }
-      const res = await api.generate(targetSessionId, {
-        message,
-        asset_ids: assetIds,
-        use_planner: usePlanner,
-        ...baseSettings,
-        ...extra,
-      })
+      const res = await api.generate(targetSessionId, { message, asset_ids: assetIds, use_planner: usePlanner, ...baseSettings, ...extra })
       if (res.requires_confirmation) {
         setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, settings: baseSettings })
-        setModalSettings({
-          size: res.plan.size,
-          resolution: res.plan.resolution,
-          quality: res.plan.quality,
-          count: res.plan.count,
-        })
         return
       }
-      if (res.generated || res.message) {
-        setDraft('')
-        clearSelectedAssets()
-      }
+      if (res.generated || res.message) { setDraft(''); clearSelectedAssets() }
       await onChanged()
       setToolDraft(null)
     } catch (err) {
@@ -823,22 +607,15 @@ function Composer({
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!sessionId || !draft.trim()) return
-    const submitted = draft.trim()
+    const { cleanText, overrides } = parseCommands(draft)
+    const submitted = cleanText.trim() || draft.trim()
     const submittedAssetIds = [...selectedAssetIds]
-    const submittedSettings = { ...settings }
-    const submittedAssets = assets.filter((asset) => submittedAssetIds.includes(asset.id))
+    const submittedSettings = { ...settings, ...overrides }
+    const submittedAssets = assets.filter((a) => submittedAssetIds.includes(a.id))
     const now = new Date().toISOString()
     setOptimisticMessages((items) => ({
       ...items,
-      [sessionId]: [
-        {
-          id: -Date.now(),
-          session_id: sessionId,
-          role: 'user',
-          content: withReferenceMarkdown(submitted, submittedAssets),
-          created_at: now,
-        },
-      ],
+      [sessionId]: [{ id: -Date.now(), session_id: sessionId, role: 'user', content: withReferenceMarkdown(submitted, submittedAssets), created_at: now }],
     }))
     setDraft('')
     clearSelectedAssets()
@@ -852,80 +629,39 @@ function Composer({
     let completed = false
     let toolUsed = false
     try {
-      await api.generateStream(
-        sessionId,
-        {
-          message: submitted,
-          asset_ids: submittedAssetIds,
-          use_planner: usePlanner,
-          ...submittedSettings,
-        },
-        (event) => {
-          if (event.type === 'content') {
-            setStreamingText((text) => text + event.text)
-          } else if (event.type === 'thinking') {
-            setThinkingText((text) => text + event.text)
-          } else if (event.type === 'confirm') {
-            keepStream = true
+      await api.generateStream(sessionId, { message: submitted, asset_ids: submittedAssetIds, use_planner: usePlanner, ...submittedSettings }, (event) => {
+        if (event.type === 'content') setStreamingText((t) => t + event.text)
+        else if (event.type === 'thinking') setThinkingText((t) => t + event.text)
+        else if (event.type === 'confirm') {
+          keepStream = true; toolUsed = true
+          setPendingRequest({ sessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
+        } else if (event.type === 'done') {
+          completed = true
+          if (event.plan?.tool_called) {
             toolUsed = true
-            setPendingRequest({ sessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
-            setModalSettings({
-              size: event.plan.size,
-              resolution: event.plan.resolution,
-              quality: event.plan.quality,
-              count: event.plan.count,
-            })
-          } else if (event.type === 'done') {
-            completed = true
-            if (event.plan?.tool_called) {
-              toolUsed = true
-              setToolDraft((current) =>
-                current?.sessionId === sessionId
-                  ? { ...current, phase: 'calling', prompt: event.plan.prompt || current.prompt }
-                  : { sessionId, phase: 'calling', prompt: event.plan.prompt, raw: '' },
-              )
-            }
-          } else if (event.type === 'error') {
-            setError(event.error)
-          } else if (event.type === 'tool') {
-            toolUsed = true
-            setToolDraft((current) => ({
-              sessionId,
-              phase: event.phase,
-              raw: (current?.sessionId === sessionId ? current.raw : '') + (event.text ?? ''),
-              prompt: event.prompt ?? current?.prompt ?? '',
-            }))
+            setToolDraft((c) => c?.sessionId === sessionId
+              ? { ...c, phase: 'calling', prompt: event.plan.prompt || c.prompt }
+              : { sessionId, phase: 'calling', prompt: event.plan.prompt, raw: '' })
           }
-        },
-      )
+        } else if (event.type === 'error') setError(event.error)
+        else if (event.type === 'tool') {
+          toolUsed = true
+          setToolDraft((c) => ({ sessionId, phase: event.phase, raw: (c?.sessionId === sessionId ? c.raw : '') + (event.text ?? ''), prompt: event.prompt ?? c?.prompt ?? '' }))
+        }
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
     } finally {
       setBusy(false)
-      if (completed) {
-        await onChanged()
-      }
-      if (!keepStream) {
-        if (!toolUsed) {
-          setStreamingText('')
-          setThinkingText('')
-          setStreamingSessionId(null)
-          setToolDraft(null)
-        }
-      }
+      if (completed) await onChanged()
+      if (!keepStream && !toolUsed) { setStreamingText(''); setThinkingText(''); setStreamingSessionId(null); setToolDraft(null) }
     }
   }
 
-  async function confirmWith(nextSettings: typeof settings, persist: boolean) {
+  async function confirmWith(nextSettings: typeof settings) {
     if (!pendingRequest) return
-    if (persist) {
-      setSettings(nextSettings)
-    }
     await requestGenerate(pendingRequest.sessionId, pendingRequest.message, pendingRequest.assetIds, pendingRequest.settings, {
-      ...nextSettings,
-      confirmed: true,
-      prompt: pendingRequest.response.plan.prompt,
-      assistant_message: pendingRequest.response.plan.assistant_message,
+      ...nextSettings, confirmed: true, prompt: pendingRequest.response.plan.prompt, assistant_message: pendingRequest.response.plan.assistant_message,
     })
     setPendingRequest(null)
   }
@@ -954,10 +690,7 @@ function Composer({
     if (!sessionId) return
     setError('')
     try {
-      if (asset.session_id === sessionId) {
-        toggleAsset(asset.id)
-        return
-      }
+      if (asset.session_id === sessionId) { toggleAsset(asset.id); return }
       const res = await api.useAsset(sessionId, asset.id)
       selectAsset(res.asset.id)
       setLibraryAssets((items) => uniqueAssets([res.asset, ...items]))
@@ -972,83 +705,63 @@ function Composer({
       <form className={`composer ${composerCentered ? 'centered' : 'docked'}`} onSubmit={submit}>
         {composerCentered && (
           <div className="composer-greeting">
-            <span className="greeting-logo">
-              <Sparkles size={18} />
-            </span>
+            <span className="greeting-logo"><Sparkles size={18} /></span>
             <h2>{greeting}</h2>
           </div>
         )}
         {selectedAssets.length > 0 && (
           <div className="selected-strip">
-            {selectedAssets.map((asset, index) => (
+            {selectedAssets.map((asset, i) => (
               <span key={asset.id} title={asset.file_name}>
                 <img src={assetImageSrc(asset)} alt={asset.file_name} />
-                图{index + 1}
-                <button type="button" className="selected-remove" onClick={() => deselectAsset(asset.id)} title="移除参考图">
-                  <X size={13} />
-                </button>
+                图{i + 1}
+                <button type="button" className="selected-remove" onClick={() => deselectAsset(asset.id)} title="移除"><X size={12} /></button>
               </span>
             ))}
           </div>
         )}
         <div className="composer-box">
-          <input
-            ref={fileInputRef}
-            className="hidden-file"
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={(event) => {
-              uploadFiles(event.target.files)
-              event.currentTarget.value = ''
-            }}
-          />
+          <input ref={fileInputRef} className="hidden-file" type="file" accept="image/*" multiple onChange={(e) => { uploadFiles(e.target.files); e.currentTarget.value = '' }} />
           <textarea
             ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                event.currentTarget.form?.requestSubmit()
-              }
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith('image/'))
+              if (files.length > 0) { e.preventDefault(); uploadFiles(files) }
             }}
-            onPaste={(event) => {
-              const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
-              if (files.length > 0) {
-                event.preventDefault()
-                uploadFiles(files)
-              }
-            }}
-            placeholder="今天想画点什么？"
+            placeholder="描述你想要的画面… 支持 --ar 16:9 --q high --n 2"
             rows={1}
           />
+          {hasCommandOverrides && (
+            <div className="param-tags">
+              {Object.entries(parsedCommands.overrides).map(([k, v]) => <span key={k} className="param-tag">{k}: {String(v)}</span>)}
+            </div>
+          )}
           <div className="composer-actions">
             <button type="button" className="icon-button" onClick={openAssetGallery} title="参考图库">
               {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
             </button>
+            <button type="button" className="icon-button" onClick={() => { setSettingsOpen((o) => !o); setAssetGalleryOpen(false) }} title="生成参数">
+              <SlidersHorizontal size={18} />
+            </button>
+            {settingsOpen && (
+              <SettingsPopover settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner} onClose={() => setSettingsOpen(false)} />
+            )}
             {assetGalleryOpen && (
               <AssetGalleryPopover
-                assets={galleryAssets}
-                selectedAssetIds={selectedAssetIds}
-                uploadProvider={uploadProvider}
-                setUploadProvider={setUploadProvider}
-                uploading={uploading}
-                loading={libraryLoading}
-                onUpload={chooseUploadFiles}
-                onUse={useGalleryAsset}
-                onPreview={(asset) => setGalleryPreview(assetImageSrc(asset))}
-                onClose={() => setAssetGalleryOpen(false)}
+                assets={galleryAssets} selectedAssetIds={selectedAssetIds} uploadProvider={uploadProvider} setUploadProvider={setUploadProvider}
+                uploading={uploading} loading={libraryLoading} onUpload={chooseUploadFiles} onUse={useGalleryAsset}
+                onPreview={(a) => setGalleryPreview(assetImageSrc(a))} onClose={() => setAssetGalleryOpen(false)}
               />
             )}
-            <label className="planner-switch" title="切换 AI Planner">
-              <span>AI Planner</span>
-              <input type="checkbox" checked={usePlanner} onChange={(event) => setUsePlanner(event.target.checked)} />
+            <label className="planner-switch" title="AI Planner 会自动优化你的参数和 prompt">
+              <span>Planner</span>
+              <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
             </label>
-            <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数">
-              <Settings2 size={18} />
-            </button>
-            <button className="send-button" disabled={busy || !sessionId} title="发送给 Planner">
+            <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数"><Settings2 size={18} /></button>
+            <button className="send-button" disabled={busy || !sessionId} title="发送">
               {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
             </button>
           </div>
@@ -1056,39 +769,20 @@ function Composer({
         {error && <p className="form-error">{error}</p>}
       </form>
       {mobileToolsOpen && (
-        <MobileMoreDrawer
-          assets={visibleAssets}
-          selectedAssetIds={selectedAssetIds}
-          toggleAsset={toggleAsset}
-          settings={settings}
-          setSettings={setSettings}
-          usePlanner={usePlanner}
-          setUsePlanner={setUsePlanner}
-          onClose={() => setMobileToolsOpen(false)}
-          onUpload={() => {
-            setMobileToolsOpen(false)
-            setAssetGalleryOpen(true)
-            loadAssetGallery()
-          }}
-        />
+        <MobileMoreDrawer assets={visibleAssets} selectedAssetIds={selectedAssetIds} toggleAsset={toggleAsset}
+          settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner}
+          onClose={() => setMobileToolsOpen(false)} onUpload={() => { setMobileToolsOpen(false); setAssetGalleryOpen(true); loadAssetGallery() }} />
       )}
       {galleryPreview && <ImageLightbox src={galleryPreview} onClose={() => setGalleryPreview(null)} />}
       {pendingRequest?.response.requires_confirmation && (
         <PlanConfirmDialog
-          plan={pendingRequest.response.plan}
-          settings={settings}
-          modalSettings={modalSettings}
-          setModalSettings={setModalSettings}
-          onUseCurrent={() => confirmWith(settings, false)}
-          onUseCustom={() => confirmWith(modalSettings, true)}
-          onContinue={() => setPendingRequest(null)}
+          plan={pendingRequest.response.plan} settings={pendingRequest.settings}
+          onAccept={() => confirmWith({ size: pendingRequest.response.plan.size, resolution: pendingRequest.response.plan.resolution, quality: pendingRequest.response.plan.quality, count: pendingRequest.response.plan.count })}
+          onKeepMine={() => confirmWith(pendingRequest.settings)}
           onCancel={() => {
             setPendingRequest(null)
             setOptimisticMessages((items) => (sessionId ? { ...items, [sessionId]: [] } : items))
-            setStreamingText('')
-            setThinkingText('')
-            setStreamingSessionId(null)
-            setError('已取消本次生图')
+            setStreamingText(''); setThinkingText(''); setStreamingSessionId(null); setError('已取消')
           }}
         />
       )}
@@ -1096,140 +790,182 @@ function Composer({
   )
 }
 
-function MarkdownText({ text }: { text: string }) {
+// ── Popovers & Dialogs ──
+
+function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, onClose }: {
+  settings: GenerationSettingsValue; setSettings: (s: Partial<GenerationSettingsValue>) => void
+  usePlanner: boolean; setUsePlanner: (v: boolean) => void; onClose: () => void
+}) {
+  const locale = useAppStore((s) => s.locale)
   return (
-    <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    <div className="settings-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="settings-popover-head">
+        <strong>生成参数</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+      </div>
+      <SettingsControls settings={settings} setSettings={setSettings} />
+      <label className="switch-row">
+        <span>AI Planner</span>
+        <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
+      </label>
     </div>
   )
 }
 
-function withReferenceMarkdown(text: string, assets: Asset[]) {
-  if (assets.length === 0) return text
-  const refs = assets.map((asset, index) => `![图${index + 1}](${assetImageSrc(asset)})`).join(' ')
-  return `${text}\n\n${refs}`
+function SettingsControls({ settings, setSettings }: { settings: GenerationSettingsValue; setSettings: (s: Partial<GenerationSettingsValue>) => void }) {
+  const locale = useAppStore((s) => s.locale)
+  return (
+    <div className="settings-controls">
+      <label title="比例为 auto 时，resolution 不参与尺寸推导。">
+        比例
+        <select value={settings.size} onChange={(e) => setSettings({ size: e.target.value })}>
+          {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((i) => <option key={i}>{i}</option>)}
+        </select>
+      </label>
+      <label title="1K/2K/4K 只在比例尺寸下生效。">
+        清晰度
+        <select value={settings.resolution} onChange={(e) => setSettings({ resolution: e.target.value })}>
+          {['1K', '2K', '4K'].map((i) => <option key={i}>{i}</option>)}
+        </select>
+      </label>
+      <label title="high 约为 medium 的 4 倍成本。">
+        质量
+        <select value={settings.quality} onChange={(e) => setSettings({ quality: e.target.value })}>
+          {['low', 'medium', 'high'].map((i) => <option key={i} value={i}>{localizeQuality(locale, i)}</option>)}
+        </select>
+      </label>
+      <label title="每张输出独立计费。">
+        数量
+        <input type="number" min={1} max={4} value={settings.count} onChange={(e) => setSettings({ count: Number(e.target.value) })} />
+      </label>
+    </div>
+  )
 }
 
-function splitReferenceMarkdown(text: string) {
-  const refs: { alt: string; url: string }[] = []
-  const cleaned = text
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, alt: string, url: string) => {
-      refs.push({ alt, url })
-      return ''
-    })
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-  return { text: cleaned || text, refs }
-}
-
-function ComposerMorePopover({
-  usePlanner,
-  setUsePlanner,
-  onUpload,
-}: {
-  usePlanner: boolean
-  setUsePlanner: (usePlanner: boolean) => void
-  onUpload: () => void
+function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, setUploadProvider, uploading, loading, onUpload, onUse, onPreview, onClose }: {
+  assets: Asset[]; selectedAssetIds: number[]; uploadProvider: string; setUploadProvider: (p: string) => void
+  uploading: boolean; loading: boolean; onUpload: () => void; onUse: (a: Asset) => void | Promise<void>; onPreview: (a: Asset) => void; onClose: () => void
 }) {
   return (
-    <div className="composer-more-popover">
-      <label className="switch-row">
-        <span>经过 AI Planner</span>
-        <input type="checkbox" checked={usePlanner} onChange={(event) => setUsePlanner(event.target.checked)} />
+    <div className="asset-gallery-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="asset-gallery-head">
+        <strong>参考图库</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+      </div>
+      <label className="asset-gallery-provider">
+        上传到
+        <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
+          <option value="evolink">Evolink</option>
+          <option value="maxqi">MaxQi</option>
+        </select>
       </label>
-      <button type="button" className="secondary-button" onClick={onUpload}>
-        <ImagePlus size={16} />
-        上传参考图
-      </button>
+      <div className="asset-gallery-grid">
+        <button type="button" className="asset-upload-tile" onClick={onUpload} title="上传">
+          {uploading ? <Loader2 className="spin" size={20} /> : <ImagePlus size={20} />}
+        </button>
+        {assets.map((asset) => (
+          <div key={asset.id} className={`asset-tile compact ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} title={asset.file_name}>
+            <img src={assetImageSrc(asset)} alt={asset.file_name} />
+            <button className="asset-use" type="button" onClick={() => onUse(asset)} title="使用">
+              {selectedAssetIds.includes(asset.id) ? '已用' : '使用'}
+            </button>
+            <button className="asset-preview-hit" type="button" onClick={() => onPreview(asset)} title="预览" />
+          </div>
+        ))}
+        {loading && <div className="asset-gallery-loading"><Loader2 className="spin" size={18} /></div>}
+      </div>
+      {!loading && assets.length === 0 && <p className="empty-note">还没有参考图</p>}
     </div>
   )
 }
 
-function MobileMoreDrawer({
-  assets,
-  selectedAssetIds,
-  toggleAsset,
-  settings,
-  setSettings,
-  usePlanner,
-  setUsePlanner,
-  onClose,
-  onUpload,
-}: {
-  assets: Asset[]
-  selectedAssetIds: number[]
-  toggleAsset: (id: number) => void
-  settings: GenerationSettingsValue
-  setSettings: (settings: Partial<GenerationSettingsValue>) => void
-  usePlanner: boolean
-  setUsePlanner: (usePlanner: boolean) => void
-  onClose: () => void
-  onUpload: () => void
+function PlanConfirmDialog({ plan, settings, onAccept, onKeepMine, onCancel }: {
+  plan: GenerationPlan; settings: GenerationSettingsValue
+  onAccept: () => void; onKeepMine: () => void; onCancel: () => void
+}) {
+  const locale = useAppStore((s) => s.locale)
+  const changed = plan.size !== settings.size || plan.resolution !== settings.resolution || plan.quality !== settings.quality || plan.count !== settings.count
+  return (
+    <div className="overlay">
+      <section className="overlay-panel confirm-panel">
+        <header>
+          <h2>AI 建议调整参数</h2>
+          <button className="icon-button" onClick={onCancel} title="取消"><X size={18} /></button>
+        </header>
+        <div className="overlay-body">
+          <div className="plan-confirm-body">
+            {changed && (
+              <div className="plan-confirm-comparison">
+                <div className="plan-confirm-side">
+                  <h4>你的参数</h4>
+                  <div className="param-row"><span>比例</span><span>{settings.size}</span></div>
+                  <div className="param-row"><span>清晰度</span><span>{settings.resolution}</span></div>
+                  <div className="param-row"><span>质量</span><span>{localizeQuality(locale, settings.quality)}</span></div>
+                  <div className="param-row"><span>数量</span><span>{settings.count}</span></div>
+                </div>
+                <div className="plan-confirm-side">
+                  <h4>AI 建议</h4>
+                  <div className="param-row"><span>比例</span><span>{plan.size}</span></div>
+                  <div className="param-row"><span>清晰度</span><span>{plan.resolution}</span></div>
+                  <div className="param-row"><span>质量</span><span>{localizeQuality(locale, plan.quality)}</span></div>
+                  <div className="param-row"><span>数量</span><span>{plan.count}</span></div>
+                </div>
+              </div>
+            )}
+            {plan.prompt && <details><summary>Prompt</summary><pre>{plan.prompt}</pre></details>}
+            <div className="confirm-actions">
+              <button className="secondary-button" onClick={onKeepMine}>保持我的参数</button>
+              <button className="primary-button" onClick={onAccept}>采用建议并生成</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function MobileMoreDrawer({ assets, selectedAssetIds, toggleAsset, settings, setSettings, usePlanner, setUsePlanner, onClose, onUpload }: {
+  assets: Asset[]; selectedAssetIds: number[]; toggleAsset: (id: number) => void
+  settings: GenerationSettingsValue; setSettings: (s: Partial<GenerationSettingsValue>) => void
+  usePlanner: boolean; setUsePlanner: (v: boolean) => void; onClose: () => void; onUpload: () => void
 }) {
   const [page, setPage] = useState(0)
   const touchStartX = useRef<number | null>(null)
-
   function finishSwipe(x: number) {
     if (touchStartX.current === null) return
     const delta = x - touchStartX.current
-    if (Math.abs(delta) > 46) {
-      setPage((current) => (delta < 0 ? Math.min(1, current + 1) : Math.max(0, current - 1)))
-    }
+    if (Math.abs(delta) > 46) setPage((c) => (delta < 0 ? Math.min(1, c + 1) : Math.max(0, c - 1)))
     touchStartX.current = null
   }
-
   return (
     <div className="drawer-scrim" onClick={onClose}>
-      <section
-        className="more-drawer"
-        onClick={(event) => event.stopPropagation()}
-        onTouchStart={(event) => {
-          touchStartX.current = event.touches[0]?.clientX ?? null
-        }}
-        onTouchEnd={(event) => finishSwipe(event.changedTouches[0]?.clientX ?? 0)}
-      >
+      <section className="more-drawer" onClick={(e) => e.stopPropagation()}
+        onTouchStart={(e) => { touchStartX.current = e.touches[0]?.clientX ?? null }}
+        onTouchEnd={(e) => finishSwipe(e.changedTouches[0]?.clientX ?? 0)}>
         <div className="drawer-handle" />
         <header className="drawer-head">
           <h2>更多</h2>
-          <div className="drawer-tabs" role="tablist" aria-label="更多页面">
-            <button type="button" className={page === 0 ? 'active' : ''} onClick={() => setPage(0)}>
-              功能
-            </button>
-            <button type="button" className={page === 1 ? 'active' : ''} onClick={() => setPage(1)}>
-              参数
-            </button>
+          <div className="drawer-tabs" role="tablist">
+            <button type="button" className={page === 0 ? 'active' : ''} onClick={() => setPage(0)}>功能</button>
+            <button type="button" className={page === 1 ? 'active' : ''} onClick={() => setPage(1)}>参数</button>
           </div>
         </header>
         <div className="drawer-pages">
           <div className="drawer-track" style={{ transform: `translateX(-${page * 50}%)` }}>
             <div className="drawer-page">
-              <label className="switch-row drawer-switch">
-                <span>经过 AI Planner</span>
-                <input type="checkbox" checked={usePlanner} onChange={(event) => setUsePlanner(event.target.checked)} />
-              </label>
-              <button type="button" className="drawer-tool" onClick={onUpload}>
-                <ImagePlus size={22} />
-                <span>上传参考图</span>
-              </button>
+              <label className="switch-row drawer-switch"><span>AI Planner</span><input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} /></label>
+              <button type="button" className="drawer-tool" onClick={onUpload}><ImagePlus size={22} /><span>上传参考图</span></button>
               {assets.length > 0 && (
                 <div className="drawer-assets">
-                  {assets.map((asset) => (
-                    <button
-                      key={asset.id}
-                      className={selectedAssetIds.includes(asset.id) ? 'selected' : ''}
-                      onClick={() => toggleAsset(asset.id)}
-                      title={asset.file_name}
-                      type="button"
-                    >
-                      <img src={assetImageSrc(asset)} alt={asset.file_name} />
+                  {assets.map((a) => (
+                    <button key={a.id} className={selectedAssetIds.includes(a.id) ? 'selected' : ''} onClick={() => toggleAsset(a.id)} title={a.file_name} type="button">
+                      <img src={assetImageSrc(a)} alt={a.file_name} />
                     </button>
                   ))}
                 </div>
               )}
             </div>
-            <div className="drawer-page">
-              <SettingsControls settings={settings} setSettings={setSettings} />
-            </div>
+            <div className="drawer-page"><SettingsControls settings={settings} setSettings={setSettings} /></div>
           </div>
         </div>
         <div className="drawer-dots" aria-hidden="true">
@@ -1241,497 +977,153 @@ function MobileMoreDrawer({
   )
 }
 
-function SettingsControls({
-  settings,
-  setSettings,
-}: {
-  settings: GenerationSettingsValue
-  setSettings: (settings: Partial<GenerationSettingsValue>) => void
-}) {
-  const locale = useAppStore((s) => s.locale)
-  return (
-    <div className="settings-controls">
-      <label title="比例为 auto 时，resolution 不参与尺寸推导。">
-        比例
-        <select value={settings.size} onChange={(e) => setSettings({ size: e.target.value })}>
-          {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((item) => (
-            <option key={item}>{item}</option>
-          ))}
-        </select>
-      </label>
-      <label title="1K/2K/4K 只在比例尺寸下生效。">
-        清晰度
-        <select value={settings.resolution} onChange={(e) => setSettings({ resolution: e.target.value })}>
-          {['1K', '2K', '4K'].map((item) => (
-            <option key={item}>{item}</option>
-          ))}
-        </select>
-      </label>
-      <label title="high 约为 medium 的 4 倍成本，low 约为 0.25 倍。">
-        质量
-        <select value={settings.quality} onChange={(e) => setSettings({ quality: e.target.value })}>
-          {['low', 'medium', 'high'].map((item) => (
-            <option key={item} value={item}>
-              {localizeQuality(locale, item)}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label title="每张输出都会独立计费。">
-        数量
-        <input type="number" min={1} max={4} value={settings.count} onChange={(e) => setSettings({ count: Number(e.target.value) })} />
-      </label>
-    </div>
-  )
-}
-
-function UploadDestinationDialog({
-  uploadProvider,
-  setUploadProvider,
-  onClose,
-  onChoose,
-}: {
-  uploadProvider: string
-  setUploadProvider: (provider: string) => void
-  onClose: () => void
-  onChoose: () => void
-}) {
-  return (
-    <div className="overlay">
-      <section className="overlay-panel upload-dialog">
-        <header>
-          <h2>上传到哪里</h2>
-          <button className="icon-button" onClick={onClose} title="关闭">
-            <X size={18} />
-          </button>
-        </header>
-        <div className="overlay-body">
-          <label>
-            上传位置
-            <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
-              <option value="evolink">Evolink</option>
-              <option value="maxqi">MaxQi</option>
-            </select>
-          </label>
-          <div className="confirm-actions upload-actions">
-            <button className="secondary-button" onClick={onClose}>
-              取消
-            </button>
-            <button className="primary-button" onClick={onChoose}>
-              选择图片
-            </button>
-          </div>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function AssetGalleryPopover({
-  assets,
-  selectedAssetIds,
-  uploadProvider,
-  setUploadProvider,
-  uploading,
-  loading,
-  onUpload,
-  onUse,
-  onPreview,
-  onClose,
-}: {
-  assets: Asset[]
-  selectedAssetIds: number[]
-  uploadProvider: string
-  setUploadProvider: (provider: string) => void
-  uploading: boolean
-  loading: boolean
-  onUpload: () => void
-  onUse: (asset: Asset) => void | Promise<void>
-  onPreview: (asset: Asset) => void
-  onClose: () => void
-}) {
-  return (
-    <div className="asset-gallery-popover" onClick={(event) => event.stopPropagation()}>
-      <div className="asset-gallery-head">
-        <strong>参考图库</strong>
-        <button type="button" className="icon-button" onClick={onClose} title="关闭">
-          <X size={16} />
-        </button>
-      </div>
-      <label className="asset-gallery-provider">
-        上传到
-        <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
-          <option value="evolink">Evolink</option>
-          <option value="maxqi">MaxQi</option>
-        </select>
-      </label>
-      <div className="asset-gallery-grid">
-        <button type="button" className="asset-upload-tile" onClick={onUpload} title="从本地上传参考图">
-          {uploading ? <Loader2 className="spin" size={22} /> : <ImagePlus size={22} />}
-        </button>
-        {assets.map((asset) => (
-          <div key={asset.id} className={`asset-tile compact ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} title={asset.file_name}>
-            <img src={assetImageSrc(asset)} alt={asset.file_name} />
-            <button className="asset-use" type="button" onClick={() => onUse(asset)} title="使用这张参考图">
-              {selectedAssetIds.includes(asset.id) ? '已使用' : '使用'}
-            </button>
-            <button className="asset-preview-hit" type="button" onClick={() => onPreview(asset)} title="预览图片" />
-          </div>
-        ))}
-        {loading && (
-          <div className="asset-gallery-loading">
-            <Loader2 className="spin" size={18} />
-          </div>
-        )}
-      </div>
-      {!loading && assets.length === 0 && <p className="empty-note">还没有参考图</p>}
-    </div>
-  )
+function MarkdownText({ text }: { text: string }) {
+  return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></div>
 }
 
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
   return (
     <div className="lightbox" onClick={onClose}>
-      <div className="lightbox-frame" onClick={(event) => event.stopPropagation()}>
-        <button className="icon-button" onClick={onClose} title="关闭">
-          <X size={18} />
-        </button>
+      <div className="lightbox-frame" onClick={(e) => e.stopPropagation()}>
+        <button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button>
         <img src={src} alt="Preview" />
       </div>
     </div>
   )
 }
 
-function PlanConfirmDialog({
-  plan,
-  settings,
-  modalSettings,
-  setModalSettings,
-  onUseCurrent,
-  onUseCustom,
-  onContinue,
-  onCancel,
-}: {
-  plan: GenerationPlan
-  settings: { size: string; resolution: string; quality: string; count: number }
-  modalSettings: { size: string; resolution: string; quality: string; count: number }
-  setModalSettings: (settings: { size: string; resolution: string; quality: string; count: number }) => void
-  onUseCurrent: () => void
-  onUseCustom: () => void
-  onContinue: () => void
-  onCancel: () => void
-}) {
-  const locale = useAppStore((s) => s.locale)
+function Overlay({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
     <div className="overlay">
-      <section className="overlay-panel confirm-panel">
-        <header>
-          <h2>Planner 建议修改参数</h2>
-          <button className="icon-button" onClick={onContinue} title="继续讨论">
-            <X size={18} />
-          </button>
-        </header>
-        <div className="overlay-body">
-          <div className="compare-grid">
-            <Metric label="当前比例" valueText={settings.size} />
-            <Metric label="建议比例" valueText={plan.size} />
-            <Metric label="当前清晰度" valueText={settings.resolution} />
-            <Metric label="建议清晰度" valueText={plan.resolution} />
-            <Metric label="当前质量" valueText={settings.quality} />
-            <Metric label="建议质量" valueText={plan.quality} />
-            <Metric label="当前数量" valueText={String(settings.count)} />
-            <Metric label="建议数量" valueText={String(plan.count)} />
-          </div>
-          <section className="panel-block">
-            <h3>直接修改后生成</h3>
-            <div className="settings-inline">
-              <select value={modalSettings.size} onChange={(e) => setModalSettings({ ...modalSettings, size: e.target.value })}>
-                {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
-              </select>
-              <select value={modalSettings.resolution} onChange={(e) => setModalSettings({ ...modalSettings, resolution: e.target.value })}>
-                {['1K', '2K', '4K'].map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
-              </select>
-              <select value={modalSettings.quality} onChange={(e) => setModalSettings({ ...modalSettings, quality: e.target.value })}>
-                {['low', 'medium', 'high'].map((item) => (
-                  <option key={item} value={item}>
-                    {localizeQuality(locale, item)}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="number"
-                min={1}
-                max={4}
-                value={modalSettings.count}
-                onChange={(e) => setModalSettings({ ...modalSettings, count: Number(e.target.value) })}
-              />
-            </div>
-          </section>
-          <details>
-            <summary>Prompt</summary>
-            <pre>{plan.prompt}</pre>
-          </details>
-          <div className="confirm-actions">
-            <button className="secondary-button" onClick={onCancel}>
-              取消生图
-            </button>
-            <button className="secondary-button" onClick={onContinue}>
-              继续讨论
-            </button>
-            <button className="secondary-button" onClick={onUseCurrent}>
-              保持当前并生成
-            </button>
-            <button className="primary-button" onClick={onUseCustom}>
-              修改并生成
-            </button>
-          </div>
-        </div>
+      <section className="overlay-panel">
+        <header><h2>{title}</h2><button className="icon-button" onClick={onClose} title="关闭"><X size={18} /></button></header>
+        <div className="overlay-body">{children}</div>
       </section>
     </div>
   )
 }
 
-function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null; assets: Asset[]; onChanged: () => void | Promise<void> }) {
-  const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
-  const toggleAsset = useAppStore((s) => s.toggleAsset)
-  const deselectAsset = useAppStore((s) => s.deselectAsset)
-  const uploadProvider = useAppStore((s) => s.uploadProvider)
-  const setUploadProvider = useAppStore((s) => s.setUploadProvider)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
+function Metric({ label, value, valueText }: { label: string; value?: number; valueText?: string }) {
+  return <div className="metric"><span>{label}</span><strong>{valueText ?? value}</strong></div>
+}
 
-  async function upload(files: FileList | null) {
-    if (!sessionId || !files?.length) return
-    setBusy(true)
+// ── Pages ──
+
+function ChatsPage({ sessions, onSelect, onArchive, onRefresh }: {
+  sessions: Session[]; onSelect: (id: number) => void; onArchive: (id: number) => Promise<void>; onRefresh: () => Promise<void>
+}) {
+  const [allSessions, setAllSessions] = useState<Session[]>([])
+  const [query, setQuery] = useState('')
+  const [error, setError] = useState('')
+  const locale = useAppStore((s) => s.locale)
+
+  useEffect(() => {
+    api.listAllSessions().then((r) => setAllSessions(r.sessions ?? [])).catch((e) => setError(e.message))
+  }, [])
+
+  const filtered = useMemo(() => {
+    const kw = query.trim().toLowerCase()
+    if (!kw) return allSessions
+    return allSessions.filter((s) => s.title.toLowerCase().includes(kw))
+  }, [allSessions, query])
+
+  const activeCount = allSessions.filter((s) => !s.archived_at).length
+  const archivedCount = allSessions.length - activeCount
+
+  async function handleArchive(session: Session) {
     setError('')
     try {
-      for (const file of Array.from(files)) {
-        await api.uploadAsset(sessionId, file, uploadProvider)
-      }
-      await onChanged()
+      if (session.archived_at) await api.unarchiveSession(session.id)
+      else await api.archiveSession(session.id)
+      const res = await api.listAllSessions()
+      setAllSessions(res.sessions ?? [])
+      await onRefresh()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '上传失败')
-    } finally {
-      setBusy(false)
+      setError(err instanceof Error ? err.message : '操作失败')
     }
   }
 
-  async function deleteAsset(asset: Asset) {
+  async function handleDelete(session: Session) {
+    if (!window.confirm(`彻底删除「${session.title}」？不可恢复。`)) return
     setError('')
     try {
-      await api.deleteAsset(asset.id)
-      deselectAsset(asset.id)
-      await onChanged()
+      await api.deleteSession(session.id)
+      const res = await api.listAllSessions()
+      setAllSessions(res.sessions ?? [])
+      await onRefresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
     }
   }
 
+  function timeAgo(dateStr: string) {
+    const diff = Date.now() - new Date(dateStr).getTime()
+    const days = Math.floor(diff / 86400000)
+    if (days === 0) return '今天'
+    if (days === 1) return '昨天'
+    if (days < 30) return `${days} 天前`
+    return new Date(dateStr).toLocaleDateString()
+  }
+
   return (
-    <section className="tool-section">
-      <div className="section-title">
-        <h2>参考图</h2>
-        <label className="icon-button file-button" title="上传参考图">
-          {busy ? <Loader2 className="spin" size={18} /> : <ImagePlus size={18} />}
-          <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(e) => upload(e.target.files)} />
-        </label>
+    <div className="page-shell">
+      <div className="page-header">
+        <h1 className="page-title">对话</h1>
+        <p className="page-subtitle">搜索和管理你的所有对话</p>
       </div>
-      <label className="upload-destination-inline">
-        上传到
-        <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
-          <option value="evolink">Evolink</option>
-          <option value="maxqi">MaxQi</option>
-        </select>
-      </label>
-      <div className="asset-grid">
-        {visibleAssets.map((asset) => (
-          <div
-            key={asset.id}
-            className={`asset-tile ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`}
-            title={asset.file_name}
-          >
-            <img src={assetImageSrc(asset)} alt={asset.file_name} />
-            <span className="asset-provider-badge">{providerLabel(asset)}</span>
-            <button className="asset-use" type="button" onClick={() => toggleAsset(asset.id)} title="使用这张参考图">
-              {selectedAssetIds.includes(asset.id) ? '已使用' : '使用'}
-            </button>
-            <button className="asset-delete" type="button" onClick={() => deleteAsset(asset)} title="移除参考图">
-              <X size={14} />
-            </button>
-          </div>
-        ))}
+      <div className="chats-page">
+        <div className="chats-search-bar">
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索对话…" autoFocus />
+        </div>
+        <div className="chats-stats">
+          <span>{activeCount} 个活跃</span>
+          <span>{archivedCount} 个归档</span>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="chats-list">
+          {filtered.map((session) => (
+            <div key={session.id} className="chat-item">
+              <button type="button" className="chat-item-info" onClick={() => onSelect(session.id)} style={{ border: 0, background: 'transparent', textAlign: 'left', cursor: 'pointer', padding: 0 }}>
+                <strong>{session.title}</strong>
+                <span>最后活跃 {timeAgo(session.updated_at)}{session.archived_at ? ' · 已归档' : ''}</span>
+              </button>
+              <div className="chat-item-actions">
+                <button className="icon-button" onClick={() => handleArchive(session)} title={session.archived_at ? '恢复' : '归档'}>
+                  {session.archived_at ? <RotateCcw size={15} /> : <Archive size={15} />}
+                </button>
+                <button className="icon-button danger-button" onClick={() => handleDelete(session)} title="删除"><Trash2 size={15} /></button>
+              </div>
+            </div>
+          ))}
+          {filtered.length === 0 && <p className="empty-note" style={{ padding: '20px 8px' }}>没有匹配的对话</p>}
+        </div>
       </div>
-      {error && <p className="form-error">{error}</p>}
-    </section>
+    </div>
   )
 }
 
-function GenerationSettings() {
-  const settings = useAppStore((s) => s.settings)
-  const setSettings = useAppStore((s) => s.setSettings)
-  return (
-    <section className="tool-section">
-      <div className="section-title">
-        <h2>参数</h2>
-        <Settings2 size={17} />
-      </div>
-      <SettingsControls settings={settings} setSettings={setSettings} />
-    </section>
-  )
-}
-
-function UserCenter({
-  activeSessionId,
-  onClose,
-  onSessionsChanged,
-}: {
-  activeSessionId: number | null
-  onClose: () => void
-  onSessionsChanged: () => void | Promise<void>
-}) {
+function GalleryPage({ activeSessionId, onSessionsChanged }: { activeSessionId: number | null; onSessionsChanged: () => void | Promise<void> }) {
   const [data, setData] = useState<UsageResponse | null>(null)
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [tab, setTab] = useState<'profile' | 'billing' | 'sessions' | 'gallery'>('profile')
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
-  const [avatarUploading, setAvatarUploading] = useState(false)
-  const [profileSaving, setProfileSaving] = useState(false)
-  const [passwordSaving, setPasswordSaving] = useState(false)
-  const [sessionQuery, setSessionQuery] = useState('')
-  const [profileDraft, setProfileDraft] = useState({ display_name: '', email: '' })
-  const [passwordDraft, setPasswordDraft] = useState({ current: '', next: '', confirm: '' })
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const avatarInputRef = useRef<HTMLInputElement | null>(null)
-  const user = useAppStore((s) => s.user)
-  const setUser = useAppStore((s) => s.setUser)
   const selectAsset = useAppStore((s) => s.selectAsset)
   const deselectAsset = useAppStore((s) => s.deselectAsset)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
-  const locale = useAppStore((s) => s.locale)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const galleryAssets = useMemo(() => uniqueAssets(data?.assets ?? []), [data?.assets])
-  const filteredSessions = useMemo(() => {
-    const keyword = sessionQuery.trim().toLowerCase()
-    if (!keyword) return sessions
-    return sessions.filter((session) => session.title.toLowerCase().includes(keyword))
-  }, [sessions, sessionQuery])
-  const activeCount = sessions.filter((session) => !session.archived_at).length
-  const archivedCount = sessions.length - activeCount
 
-  useEffect(() => {
-    if (!user) return
-    setProfileDraft({ display_name: user.display_name || '', email: user.email || '' })
-  }, [user?.display_name, user?.email])
-
-  async function loadSessions() {
-    const res = await api.listAllSessions()
-    setSessions(res.sessions ?? [])
+  async function load() {
+    const res = await api.usage()
+    setData(res)
   }
 
-  async function updateSessionArchive(session: Session) {
-    setError('')
-    try {
-      if (session.archived_at) {
-        await api.unarchiveSession(session.id)
-      } else {
-        await api.archiveSession(session.id)
-      }
-      await Promise.all([loadSessions(), onSessionsChanged()])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '操作失败')
-    }
-  }
+  useEffect(() => { load().catch((e) => setError(e.message)) }, [])
 
-  async function loadUsage() {
-    const next = await api.usage()
-    setData(next)
-  }
-
-  async function saveProfile(event: FormEvent) {
-    event.preventDefault()
-    setProfileSaving(true)
-    setError('')
-    setNotice('')
-    try {
-      const res = await api.updateMe(profileDraft)
-      setUser(res.user)
-      setNotice('资料已更新')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setProfileSaving(false)
-    }
-  }
-
-  async function savePassword(event: FormEvent) {
-    event.preventDefault()
-    if (passwordDraft.next !== passwordDraft.confirm) {
-      setError('两次输入的新密码不一致')
-      return
-    }
-    setPasswordSaving(true)
-    setError('')
-    setNotice('')
-    try {
-      await api.updatePassword({ current_password: passwordDraft.current, new_password: passwordDraft.next })
-      setPasswordDraft({ current: '', next: '', confirm: '' })
-      setNotice('密码已更新')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '修改密码失败')
-    } finally {
-      setPasswordSaving(false)
-    }
-  }
-
-  async function uploadAvatar(file: File | undefined) {
-    if (!file) return
-    setAvatarUploading(true)
-    setError('')
-    setNotice('')
-    try {
-      const res = await api.uploadAvatar(file)
-      setUser(res.user)
-      setNotice('头像已更新')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '上传头像失败')
-    } finally {
-      setAvatarUploading(false)
-    }
-  }
-
-  async function useLibraryAsset(asset: Asset) {
-    if (!activeSessionId) return
-    setError('')
-    try {
-      const res = await api.useAsset(activeSessionId, asset.id)
-      selectAsset(res.asset.id)
-      await Promise.all([loadUsage(), onSessionsChanged()])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '操作失败')
-    }
-  }
-
-  async function deleteLibraryAsset(asset: Asset) {
-    setError('')
-    try {
-      await api.deleteAsset(asset.id)
-      deselectAsset(asset.id)
-      await Promise.all([loadUsage(), onSessionsChanged()])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '删除失败')
-    }
-  }
-
-  async function uploadLibraryAssets(files: FileList | null) {
+  async function uploadFiles(files: FileList | null) {
     if (!activeSessionId || !files?.length) {
-      setError('请先选择一个当前对话再上传参考图')
+      setError('请先选择一个对话再上传')
       return
     }
     setUploading(true)
@@ -1743,7 +1135,7 @@ function UserCenter({
           selectAsset(res.asset.id)
         }
       }
-      await Promise.all([loadUsage(), onSessionsChanged()])
+      await Promise.all([load(), onSessionsChanged()])
     } catch (err) {
       setError(err instanceof Error ? err.message : '上传失败')
     } finally {
@@ -1751,252 +1143,211 @@ function UserCenter({
     }
   }
 
-  async function permanentlyDeleteSession(session: Session) {
-    if (!window.confirm(`彻底删除「${session.title}」？这个操作不可恢复。`)) return
+  async function useAsset(asset: Asset) {
+    if (!activeSessionId) return
     setError('')
     try {
-      await api.deleteSession(session.id)
-      await Promise.all([loadSessions(), onSessionsChanged()])
+      const res = await api.useAsset(activeSessionId, asset.id)
+      selectAsset(res.asset.id)
+      await Promise.all([load(), onSessionsChanged()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
+  async function deleteAsset(asset: Asset) {
+    setError('')
+    try {
+      await api.deleteAsset(asset.id)
+      deselectAsset(asset.id)
+      await Promise.all([load(), onSessionsChanged()])
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败')
     }
   }
 
-  useEffect(() => {
-    loadUsage().catch((err) => setError(err.message))
-    loadSessions().catch((err) => setError(err.message))
-  }, [])
-
   return (
-    <Overlay title="设置中心" onClose={onClose}>
-      {error && <p className="form-error">{error}</p>}
-      {notice && <p className="form-success">{notice}</p>}
-      {data ? (
-        <div className="settings-center">
-          <aside className="settings-nav">
-            <div className="settings-user-card">
-              <UserAvatar user={user} size="large" />
-              <div>
-                <strong>{userDisplayName(user)}</strong>
-                <span>{user?.email}</span>
-              </div>
-            </div>
-            <button type="button" className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}>
-              <UserRound size={17} />
-              <span>账户</span>
-            </button>
-            <button type="button" className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>
-              <CreditCard size={17} />
-              <span>账单</span>
-            </button>
-            <button type="button" className={tab === 'sessions' ? 'active' : ''} onClick={() => setTab('sessions')}>
-              <MessageSquarePlus size={17} />
-              <span>对话</span>
-            </button>
-            <button type="button" className={tab === 'gallery' ? 'active' : ''} onClick={() => setTab('gallery')}>
-              <Images size={17} />
-              <span>画廊</span>
-            </button>
-          </aside>
-          <div className="settings-content">
-            {tab === 'profile' && (
-              <div className="settings-page">
-                <section className="profile-hero">
-                  <button type="button" className="avatar-uploader" onClick={() => avatarInputRef.current?.click()} title="上传头像">
-                    <UserAvatar user={user} size="large" />
-                    <span>{avatarUploading ? <Loader2 className="spin" size={16} /> : <Camera size={16} />}</span>
-                  </button>
-                  <input
-                    ref={avatarInputRef}
-                    className="hidden-file"
-                    type="file"
-                    accept="image/*"
-                    onChange={(event) => {
-                      uploadAvatar(event.target.files?.[0])
-                      event.currentTarget.value = ''
-                    }}
-                  />
-                  <div>
-                    <h3>{userDisplayName(user)}</h3>
-                    <p>{user?.role === 'admin' ? '管理员账户' : '创作账户'}</p>
-                  </div>
-                </section>
-                <form className="profile-form" onSubmit={saveProfile}>
-                  <label>
-                    <span>
-                      <UserRound size={15} />
-                      名字
-                    </span>
-                    <input value={profileDraft.display_name} onChange={(e) => setProfileDraft((draft) => ({ ...draft, display_name: e.target.value }))} />
-                  </label>
-                  <label>
-                    <span>
-                      <Mail size={15} />
-                      邮箱
-                    </span>
-                    <input
-                      type="email"
-                      value={profileDraft.email}
-                      onChange={(e) => setProfileDraft((draft) => ({ ...draft, email: e.target.value }))}
-                    />
-                  </label>
-                  <button className="primary-button" disabled={profileSaving}>
-                    {profileSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />}
-                    保存资料
-                  </button>
-                </form>
-                <form className="profile-form password-form" onSubmit={savePassword}>
-                  <label>
-                    <span>
-                      <KeyRound size={15} />
-                      当前密码
-                    </span>
-                    <input
-                      type="password"
-                      value={passwordDraft.current}
-                      onChange={(e) => setPasswordDraft((draft) => ({ ...draft, current: e.target.value }))}
-                    />
-                  </label>
-                  <label>
-                    <span>
-                      <Lock size={15} />
-                      新密码
-                    </span>
-                    <input
-                      type="password"
-                      minLength={8}
-                      value={passwordDraft.next}
-                      onChange={(e) => setPasswordDraft((draft) => ({ ...draft, next: e.target.value }))}
-                    />
-                  </label>
-                  <label>
-                    <span>
-                      <KeyRound size={15} />
-                      确认密码
-                    </span>
-                    <input
-                      type="password"
-                      minLength={8}
-                      value={passwordDraft.confirm}
-                      onChange={(e) => setPasswordDraft((draft) => ({ ...draft, confirm: e.target.value }))}
-                    />
-                  </label>
-                  <button className="secondary-button" disabled={passwordSaving}>
-                    {passwordSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />}
-                    修改密码
-                  </button>
-                </form>
-              </div>
-            )}
-            {tab === 'billing' && (
-              <div className="settings-page">
-                <div className="metric-grid billing-metrics">
-                  <Metric label="点数" value={data.summary.credits} />
-                  <Metric label="已生成" value={data.summary.generated_tasks} />
-                  <Metric label="已完成" value={data.summary.completed_tasks} />
-                  <Metric label="已消耗" value={data.summary.credits_spent} />
-                </div>
-                <section className="panel-block">
-                  <h3>账单明细</h3>
-                  <div className="ledger-list">
-                    {(data.ledger ?? []).map((item) => (
-                      <div key={item.id}>
-                        <span>{localizeReason(locale, item.reason)}</span>
-                        <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
-                        <small>{new Date(item.created_at).toLocaleString()}</small>
-                      </div>
-                    ))}
-                    {(data.ledger ?? []).length === 0 && <p className="empty-note">还没有账单记录</p>}
-                  </div>
-                </section>
-              </div>
-            )}
-            {tab === 'sessions' && (
-              <div className="settings-page">
-                <div className="conversation-toolbar">
-                  <div className="conversation-stats">
-                    <span>{activeCount} 个活跃</span>
-                    <span>{archivedCount} 个归档</span>
-                  </div>
-                  <input value={sessionQuery} onChange={(e) => setSessionQuery(e.target.value)} placeholder="搜索对话" />
-                </div>
-                <div className="conversation-list">
-                  {filteredSessions.map((session) => (
-                    <article key={session.id} className="conversation-item">
-                      <div>
-                        <strong title={session.title}>{session.title}</strong>
-                        <span>{new Date(session.updated_at).toLocaleString()}</span>
-                      </div>
-                      <code>{session.archived_at ? '已归档' : localizeStatus(locale, session.task_status || '') || '活跃'}</code>
-                      <div className="conversation-actions">
-                        <button className="icon-button" onClick={() => updateSessionArchive(session)} title={session.archived_at ? '恢复对话' : '归档对话'}>
-                          {session.archived_at ? <RotateCcw size={16} /> : <Archive size={16} />}
-                        </button>
-                        <button className="icon-button danger-button" onClick={() => permanentlyDeleteSession(session)} title="彻底删除">
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                  {filteredSessions.length === 0 && <p className="empty-note">没有匹配的对话</p>}
-                </div>
-              </div>
-            )}
-            {tab === 'gallery' && (
-              <div className="settings-page">
-                <div className="gallery-toolbar">
-                  <label>
-                    上传到
-                    <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
-                      <option value="evolink">Evolink</option>
-                      <option value="maxqi">MaxQi</option>
-                    </select>
-                  </label>
-                  <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
-                    {uploading ? <Loader2 className="spin" size={16} /> : <ImagePlus size={16} />}
-                    上传图片
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    className="hidden-file"
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={(event) => {
-                      uploadLibraryAssets(event.target.files)
-                      event.currentTarget.value = ''
-                    }}
-                  />
-                </div>
-                <div className="gallery-grid">
-                  {galleryAssets.map((asset) => (
-                    <div key={asset.id} className="asset-tile gallery-tile" title={asset.file_name}>
-                      <img src={assetImageSrc(asset)} alt={asset.file_name} />
-                      <span className="asset-provider-badge">{providerLabel(asset)}</span>
-                      <button className="asset-use" type="button" onClick={() => useLibraryAsset(asset)} title="使用这张参考图">
-                        使用
-                      </button>
-                      <button className="asset-delete" type="button" onClick={() => deleteLibraryAsset(asset)} title="移除参考图">
-                        <X size={14} />
-                      </button>
-                      <button className="asset-preview-hit" type="button" onClick={() => setPreview(assetImageSrc(asset))} title="预览图片" />
-                    </div>
-                  ))}
-                </div>
-                {galleryAssets.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
-              </div>
-            )}
-          </div>
+    <div className="page-shell">
+      <div className="page-header">
+        <h1 className="page-title">画廊</h1>
+        <p className="page-subtitle">你的所有参考图和生成作品</p>
+      </div>
+      <div className="gallery-page">
+        <div className="gallery-toolbar">
+          <label>
+            上传到
+            <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
+              <option value="evolink">Evolink</option>
+              <option value="maxqi">MaxQi</option>
+            </select>
+          </label>
+          <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
+            {uploading ? <Loader2 className="spin" size={16} /> : <ImagePlus size={16} />}
+            上传图片
+          </button>
+          <input ref={fileInputRef} className="hidden-file" type="file" accept="image/*" multiple onChange={(e) => { uploadFiles(e.target.files); e.currentTarget.value = '' }} />
         </div>
-      ) : (
-        <Loader2 className="spin" size={20} />
-      )}
+        {error && <p className="form-error">{error}</p>}
+        <div className="gallery-grid">
+          {galleryAssets.map((asset) => (
+            <div key={asset.id} className="asset-tile gallery-tile" title={asset.file_name}>
+              <img src={assetImageSrc(asset)} alt={asset.file_name} />
+              <span className="asset-provider-badge">{providerLabel(asset)}</span>
+              <button className="asset-use" type="button" onClick={() => useAsset(asset)} title="使用">使用</button>
+              <button className="asset-delete" type="button" onClick={() => deleteAsset(asset)} title="删除"><X size={14} /></button>
+              <button className="asset-preview-hit" type="button" onClick={() => setPreview(assetImageSrc(asset))} title="预览" />
+            </div>
+          ))}
+        </div>
+        {galleryAssets.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
+      </div>
       {preview && <ImageLightbox src={preview} onClose={() => setPreview(null)} />}
-    </Overlay>
+    </div>
   )
 }
 
-function AdminPanel({ onClose }: { onClose: () => void }) {
+function SettingsPage() {
+  const user = useAppStore((s) => s.user)
+  const setUser = useAppStore((s) => s.setUser)
+  const theme = useAppStore((s) => s.theme)
+  const toggleTheme = useAppStore((s) => s.toggleTheme)
+  const locale = useAppStore((s) => s.locale)
+  const setLocale = useAppStore((s) => s.setLocale)
+  const [tab, setTab] = useState<'profile' | 'billing'>('profile')
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [data, setData] = useState<UsageResponse | null>(null)
+  const [profileDraft, setProfileDraft] = useState({ display_name: '', email: '' })
+  const [passwordDraft, setPasswordDraft] = useState({ current: '', next: '', confirm: '' })
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [passwordSaving, setPasswordSaving] = useState(false)
+  const [avatarUploading, setAvatarUploading] = useState(false)
+  const avatarInputRef = useRef<HTMLInputElement | null>(null)
+
+  useEffect(() => {
+    if (!user) return
+    setProfileDraft({ display_name: user.display_name || '', email: user.email || '' })
+  }, [user?.display_name, user?.email])
+
+  useEffect(() => {
+    api.usage().then(setData).catch((e) => setError(e.message))
+  }, [])
+
+  async function saveProfile(event: FormEvent) {
+    event.preventDefault()
+    setProfileSaving(true); setError(''); setNotice('')
+    try {
+      const res = await api.updateMe(profileDraft)
+      setUser(res.user); setNotice('资料已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败')
+    } finally { setProfileSaving(false) }
+  }
+
+  async function savePassword(event: FormEvent) {
+    event.preventDefault()
+    if (passwordDraft.next !== passwordDraft.confirm) { setError('两次密码不一致'); return }
+    setPasswordSaving(true); setError(''); setNotice('')
+    try {
+      await api.updatePassword({ current_password: passwordDraft.current, new_password: passwordDraft.next })
+      setPasswordDraft({ current: '', next: '', confirm: '' }); setNotice('密码已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '修改失败')
+    } finally { setPasswordSaving(false) }
+  }
+
+  async function uploadAvatar(file: File | undefined) {
+    if (!file) return
+    setAvatarUploading(true); setError(''); setNotice('')
+    try {
+      const res = await api.uploadAvatar(file)
+      setUser(res.user); setNotice('头像已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '上传失败')
+    } finally { setAvatarUploading(false) }
+  }
+
+  return (
+    <div className="page-shell">
+      <div className="page-header">
+        <h1 className="page-title">设置</h1>
+        <p className="page-subtitle">管理你的账户和偏好</p>
+      </div>
+      {error && <p className="form-error">{error}</p>}
+      {notice && <p className="form-success">{notice}</p>}
+      <div className="settings-layout">
+        <nav className="settings-nav">
+          <button type="button" className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}><UserRound size={16} /><span>账户</span></button>
+          <button type="button" className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}><CreditCard size={16} /><span>账单</span></button>
+        </nav>
+        <div className="settings-content">
+          {tab === 'profile' && (
+            <>
+              <section className="profile-hero">
+                <button type="button" className="avatar-uploader" onClick={() => avatarInputRef.current?.click()} title="上传头像">
+                  <UserAvatar user={user} size="large" />
+                  <span>{avatarUploading ? <Loader2 className="spin" size={14} /> : <Camera size={14} />}</span>
+                </button>
+                <input ref={avatarInputRef} className="hidden-file" type="file" accept="image/*" onChange={(e) => { uploadAvatar(e.target.files?.[0]); e.currentTarget.value = '' }} />
+                <div>
+                  <h3>{userDisplayName(user)}</h3>
+                  <p>{user?.role === 'admin' ? '管理员' : '创作者'}</p>
+                </div>
+              </section>
+              <form className="profile-form" onSubmit={saveProfile}>
+                <label><span><UserRound size={14} /> 名字</span><input value={profileDraft.display_name} onChange={(e) => setProfileDraft((d) => ({ ...d, display_name: e.target.value }))} /></label>
+                <label><span><Mail size={14} /> 邮箱</span><input type="email" value={profileDraft.email} onChange={(e) => setProfileDraft((d) => ({ ...d, email: e.target.value }))} /></label>
+                <button className="primary-button" disabled={profileSaving}>{profileSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />} 保存</button>
+              </form>
+              <form className="profile-form password-form" onSubmit={savePassword}>
+                <label><span><KeyRound size={14} /> 当前密码</span><input type="password" value={passwordDraft.current} onChange={(e) => setPasswordDraft((d) => ({ ...d, current: e.target.value }))} /></label>
+                <label><span><Lock size={14} /> 新密码</span><input type="password" minLength={8} value={passwordDraft.next} onChange={(e) => setPasswordDraft((d) => ({ ...d, next: e.target.value }))} /></label>
+                <label><span><KeyRound size={14} /> 确认</span><input type="password" minLength={8} value={passwordDraft.confirm} onChange={(e) => setPasswordDraft((d) => ({ ...d, confirm: e.target.value }))} /></label>
+                <button className="secondary-button" disabled={passwordSaving}>{passwordSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />} 修改密码</button>
+              </form>
+              <div className="panel-block">
+                <h3>偏好</h3>
+                <label className="switch-row">
+                  <span>{theme === 'dark' ? '夜间模式' : '日间模式'}</span>
+                  <button type="button" className="icon-button" onClick={toggleTheme}>{theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}</button>
+                </label>
+                <label className="switch-row">
+                  <span>语言</span>
+                  <button type="button" className="icon-button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}><Languages size={16} /></button>
+                </label>
+              </div>
+            </>
+          )}
+          {tab === 'billing' && data && (
+            <>
+              <div className="metric-grid">
+                <Metric label="点数" value={data.summary.credits} />
+                <Metric label="已生成" value={data.summary.generated_tasks} />
+                <Metric label="已完成" value={data.summary.completed_tasks} />
+                <Metric label="已消耗" value={data.summary.credits_spent} />
+              </div>
+              <section className="panel-block">
+                <h3>账单明细</h3>
+                <div className="ledger-list">
+                  {(data.ledger ?? []).map((item) => (
+                    <div key={item.id}>
+                      <span>{localizeReason(locale, item.reason)}</span>
+                      <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
+                      <small>{new Date(item.created_at).toLocaleString()}</small>
+                    </div>
+                  ))}
+                  {(data.ledger ?? []).length === 0 && <p className="empty-note">还没有账单记录</p>}
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function AdminPage() {
   const [users, setUsers] = useState<User[]>([])
   const [delta, setDelta] = useState<Record<number, string>>({})
   const [error, setError] = useState('')
@@ -2012,63 +1363,53 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
     if (!Number.isFinite(value) || value === 0) return
     try {
       const res = await api.adminAdjustCredits(user.id, { delta: value, reason: 'admin_adjustment' })
-      setUsers((items) => items.map((item) => (item.id === user.id ? res.user : item)))
-      setDelta((current) => ({ ...current, [user.id]: '' }))
+      setUsers((items) => items.map((i) => (i.id === user.id ? res.user : i)))
+      setDelta((c) => ({ ...c, [user.id]: '' }))
     } catch (err) {
       setError(err instanceof Error ? err.message : '调整失败')
     }
   }
 
-  useEffect(() => {
-    load().catch((err) => setError(err.message))
-  }, [])
+  useEffect(() => { load().catch((e) => setError(e.message)) }, [])
 
   return (
-    <Overlay title="管理员" onClose={onClose}>
-      {error && <p className="form-error">{error}</p>}
-      <div className="admin-list">
-        {users.map((item) => (
-          <div className="admin-row" key={item.id}>
-            <div>
-              <strong>{item.display_name}</strong>
-              <span>{item.email}</span>
-            </div>
-            <code>{translate(locale, `role.${item.role}`, item.role)}</code>
-            <b>{item.credits}</b>
-            <input value={delta[item.id] ?? ''} onChange={(e) => setDelta((current) => ({ ...current, [item.id]: e.target.value }))} placeholder="+10 / -5" />
-            <button className="secondary-button" onClick={() => adjust(item)}>
-              调整
-            </button>
-          </div>
-        ))}
+    <div className="page-shell">
+      <div className="page-header">
+        <h1 className="page-title">管理</h1>
+        <p className="page-subtitle">用户管理和点数调整</p>
       </div>
-    </Overlay>
-  )
-}
-
-function Overlay({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
-  return (
-    <div className="overlay">
-      <section className="overlay-panel">
-        <header>
-          <h2>{title}</h2>
-          <button className="icon-button" onClick={onClose} title="关闭">
-            <X size={18} />
-          </button>
-        </header>
-        <div className="overlay-body">{children}</div>
-      </section>
+      <div className="admin-page">
+        {error && <p className="form-error">{error}</p>}
+        <div className="admin-list">
+          {users.map((item) => (
+            <div className="admin-row" key={item.id}>
+              <div><strong>{item.display_name}</strong><span>{item.email}</span></div>
+              <code>{translate(locale, `role.${item.role}`, item.role)}</code>
+              <b>{item.credits}</b>
+              <input value={delta[item.id] ?? ''} onChange={(e) => setDelta((c) => ({ ...c, [item.id]: e.target.value }))} placeholder="+10 / -5" />
+              <button className="secondary-button" onClick={() => adjust(item)}>调整</button>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
 
-function Metric({ label, value, valueText }: { label: string; value?: number; valueText?: string }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{valueText ?? value}</strong>
-    </div>
-  )
+// ── Utilities ──
+
+function withReferenceMarkdown(text: string, assets: Asset[]) {
+  if (assets.length === 0) return text
+  const refs = assets.map((a, i) => `![图${i + 1}](${assetImageSrc(a)})`).join(' ')
+  return `${text}\n\n${refs}`
+}
+
+function splitReferenceMarkdown(text: string) {
+  const refs: { alt: string; url: string }[] = []
+  const cleaned = text
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_m, alt: string, url: string) => { refs.push({ alt, url }); return '' })
+    .replace(/\n{3,}/g, '\n\n').trim()
+  return { text: cleaned || text, refs }
 }
 
 function userDisplayName(user: User | null) {
@@ -2078,14 +1419,8 @@ function userDisplayName(user: User | null) {
 function initialsFor(name: string) {
   const trimmed = name.trim()
   if (!trimmed) return 'P'
-  const asciiParts = trimmed.split(/\s+/).filter(Boolean)
-  if (asciiParts.length > 1) {
-    return asciiParts
-      .slice(0, 2)
-      .map((part) => part[0])
-      .join('')
-      .toUpperCase()
-  }
+  const parts = trimmed.split(/\s+/).filter(Boolean)
+  if (parts.length > 1) return parts.slice(0, 2).map((p) => p[0]).join('').toUpperCase()
   return Array.from(trimmed).slice(0, 2).join('').toUpperCase()
 }
 
@@ -2110,26 +1445,22 @@ function buildComposerGreeting(user: User | null) {
 
 function hashString(value: string) {
   let hash = 0
-  for (const char of value) {
-    hash = (hash * 31 + char.charCodeAt(0)) >>> 0
-  }
+  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
   return hash
 }
 
 function uniqueAssets(assets: Asset[]) {
   const seen = new Set<string>()
-  return assets.filter((asset) => {
-    const provider = asset.provider || 'default'
-    const key = asset.content_hash ? `${provider}:hash:${asset.content_hash}` : asset.url ? `${provider}:url:${asset.url}` : `asset:${asset.id}`
+  return assets.filter((a) => {
+    const provider = a.provider || 'default'
+    const key = a.content_hash ? `${provider}:hash:${a.content_hash}` : a.url ? `${provider}:url:${a.url}` : `asset:${a.id}`
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
 }
 
-function assetImageSrc(asset: Asset) {
-  return asset.local_url || asset.url
-}
+function assetImageSrc(asset: Asset) { return asset.local_url || asset.url }
 
 function providerLabel(asset: Asset) {
   if (!asset.provider) return '未知渠道'
@@ -2143,21 +1474,75 @@ function extractImages(task?: Task): string[] {
   try {
     const parsed = JSON.parse(task.result_json)
     if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { pictu_local_urls?: unknown }).pictu_local_urls)) {
-      return ((parsed as { pictu_local_urls: unknown[] }).pictu_local_urls).filter((item): item is string => typeof item === 'string')
+      return ((parsed as { pictu_local_urls: unknown[] }).pictu_local_urls).filter((i): i is string => typeof i === 'string')
     }
     const urls = new Set<string>()
-    const walk = (value: unknown) => {
-      if (typeof value === 'string' && /^(https?:\/\/.+|\/generated\/.+)\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) {
-        urls.add(value)
-      } else if (Array.isArray(value)) {
-        value.forEach(walk)
-      } else if (value && typeof value === 'object') {
-        Object.values(value).forEach(walk)
-      }
+    const walk = (v: unknown) => {
+      if (typeof v === 'string' && /^(https?:\/\/.+|\/generated\/.+)\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(v)) urls.add(v)
+      else if (Array.isArray(v)) v.forEach(walk)
+      else if (v && typeof v === 'object') Object.values(v).forEach(walk)
     }
     walk(parsed)
     return Array.from(urls)
-  } catch {
-    return []
+  } catch { return [] }
+}
+
+function AuthScreen() {
+  const setAuth = useAppStore((s) => s.setAuth)
+  const toggleTheme = useAppStore((s) => s.toggleTheme)
+  const theme = useAppStore((s) => s.theme)
+  const [mode, setMode] = useState<'login' | 'register'>('register')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      const res = mode === 'register'
+        ? await api.register({ email, password, display_name: displayName })
+        : await api.login({ email, password })
+      setAuth(res.token, res.user)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '请求失败')
+    } finally {
+      setBusy(false)
+    }
   }
+
+  return (
+    <main className="auth-shell">
+      <button className="icon-button theme-float" onClick={toggleTheme} title="切换明暗模式">
+        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
+      <section className="auth-copy">
+        <div className="brand-mark">
+          <Sparkles size={18} />
+          <span>PicTu</span>
+        </div>
+        <h1>艺术灵感从这开始</h1>
+        <p>AI 图像会话工作台</p>
+      </section>
+      <form className="auth-card" onSubmit={submit}>
+        <div className="tabs">
+          <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册</button>
+          <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>登录</button>
+        </div>
+        {mode === 'register' && (
+          <label>名称<input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="工作室名称" /></label>
+        )}
+        <label>邮箱<input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="you@example.com" /></label>
+        <label>密码<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required minLength={8} placeholder="至少 8 位" /></label>
+        {error && <p className="form-error">{error}</p>}
+        <button className="primary-button" disabled={busy}>
+          {busy ? <Loader2 className="spin" size={17} /> : <Wand2 size={17} />}
+          {mode === 'register' ? '创建账户' : '进入'}
+        </button>
+      </form>
+    </main>
+  )
 }

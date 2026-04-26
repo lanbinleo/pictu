@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { User } from '../types/api'
 
+export type Page = 'workspace' | 'gallery' | 'chats' | 'settings' | 'admin'
+
 type AppState = {
   token: string
   user: User | null
@@ -18,6 +20,7 @@ type AppState = {
   locale: 'zh-CN' | 'en-US'
   uploadProvider: string
   usePlanner: boolean
+  page: Page
   setAuth: (token: string, user: User) => void
   clearAuth: () => void
   setUser: (user: User) => void
@@ -32,6 +35,7 @@ type AppState = {
   setLocale: (locale: AppState['locale']) => void
   setUploadProvider: (provider: string) => void
   setUsePlanner: (usePlanner: boolean) => void
+  setPage: (page: Page) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -52,10 +56,11 @@ export const useAppStore = create<AppState>()(
       locale: 'zh-CN',
       uploadProvider: 'evolink',
       usePlanner: true,
+      page: 'workspace',
       setAuth: (token, user) => set({ token, user }),
-      clearAuth: () => set({ token: '', user: null, activeSessionId: null, selectedAssetIds: [] }),
+      clearAuth: () => set({ token: '', user: null, activeSessionId: null, selectedAssetIds: [], page: 'workspace' }),
       setUser: (user) => set({ user }),
-      setActiveSessionId: (id) => set({ activeSessionId: id, selectedAssetIds: [] }),
+      setActiveSessionId: (id) => set({ activeSessionId: id, selectedAssetIds: [], page: 'workspace' }),
       setDraft: (draft) => set({ draft }),
       toggleAsset: (id) =>
         set((state) => ({
@@ -74,6 +79,7 @@ export const useAppStore = create<AppState>()(
       setLocale: (locale) => set({ locale }),
       setUploadProvider: (provider) => set({ uploadProvider: provider }),
       setUsePlanner: (usePlanner) => set({ usePlanner }),
+      setPage: (page) => set({ page }),
     }),
     {
       name: 'pictu-app-state',
