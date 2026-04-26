@@ -3,12 +3,21 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Archive,
+  Camera,
+  ChevronDown,
+  ChevronUp,
   Plus,
   Check,
+  CreditCard,
   ImagePlus,
+  Images,
   Info,
+  KeyRound,
+  Languages,
+  Lock,
   Loader2,
   LogOut,
+  Mail,
   MessageSquarePlus,
   Moon,
   PanelLeft,
@@ -21,7 +30,7 @@ import {
   Sun,
   RotateCcw,
   Trash2,
-  UserCircle,
+  UserRound,
   Wand2,
   X,
 } from 'lucide-react'
@@ -166,6 +175,7 @@ function Workspace() {
   const [toolDraft, setToolDraft] = useState<ToolDraft | null>(null)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [rightCollapsed, setRightCollapsed] = useState(false)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -305,8 +315,8 @@ function Workspace() {
               </button>
             </div>
             <div className="rail-bottom">
-              <button className="rail-button" onClick={() => setOverlay('account')} title="用户中心">
-                <UserCircle size={18} />
+              <button className="rail-button avatar-rail-button" onClick={() => setOverlay('account')} title="设置中心">
+                <UserAvatar user={user} size="small" />
               </button>
             </div>
           </div>
@@ -352,27 +362,24 @@ function Workspace() {
         </nav>
 
         <div className="sidebar-foot">
-          <button className="user-chip" onClick={() => setOverlay('account')} title="用户中心">
-            <UserCircle size={18} />
-            <span>{user?.display_name || user?.email}</span>
-            <strong>{user?.credits ?? 0}</strong>
-          </button>
-          <div className="foot-actions">
-            {user?.role === 'admin' && (
-              <button className="icon-button" onClick={() => setOverlay('admin')} title="管理员面板">
-                <Shield size={18} />
-              </button>
-            )}
-            <button className="icon-button" onClick={toggleTheme} title="切换明暗模式">
-              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-            <button className="icon-button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')} title="切换语言">
-              {locale === 'zh-CN' ? '中' : 'EN'}
-            </button>
-            <button className="icon-button" onClick={clearAuth} title="退出登录">
-              <LogOut size={18} />
-            </button>
-          </div>
+          <UserDock
+            user={user}
+            open={userMenuOpen}
+            theme={theme}
+            locale={locale}
+            onToggleOpen={() => setUserMenuOpen((open) => !open)}
+            onOpenSettings={() => {
+              setOverlay('account')
+              setUserMenuOpen(false)
+            }}
+            onOpenAdmin={() => {
+              setOverlay('admin')
+              setUserMenuOpen(false)
+            }}
+            onToggleTheme={toggleTheme}
+            onToggleLocale={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}
+            onLogout={clearAuth}
+          />
         </div>
           </>
         )}
@@ -484,6 +491,75 @@ function EditableTitle({ title, onSave }: { title: string; onSave: (title: strin
       <h1>{title}</h1>
       <button className="icon-button quiet" onClick={() => setEditing(true)} title="修改会话名称">
         <Pencil size={16} />
+      </button>
+    </div>
+  )
+}
+
+function UserAvatar({ user, size = 'regular' }: { user: User | null; size?: 'small' | 'regular' | 'large' }) {
+  const name = userDisplayName(user)
+  return (
+    <span className={`avatar ${size}`}>
+      {user?.avatar_url ? <img src={user.avatar_url} alt={name} /> : <span>{initialsFor(name)}</span>}
+    </span>
+  )
+}
+
+function UserDock({
+  user,
+  open,
+  theme,
+  locale,
+  onToggleOpen,
+  onOpenSettings,
+  onOpenAdmin,
+  onToggleTheme,
+  onToggleLocale,
+  onLogout,
+}: {
+  user: User | null
+  open: boolean
+  theme: 'light' | 'dark'
+  locale: Locale
+  onToggleOpen: () => void
+  onOpenSettings: () => void
+  onOpenAdmin: () => void
+  onToggleTheme: () => void
+  onToggleLocale: () => void
+  onLogout: () => void
+}) {
+  return (
+    <div className="user-dock">
+      {open && (
+        <div className="user-menu">
+          <button type="button" onClick={onOpenSettings}>
+            <Settings2 size={17} />
+            <span>设置中心</span>
+          </button>
+          <button type="button" onClick={onToggleTheme}>
+            {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+            <span>{theme === 'dark' ? '切换日间模式' : '切换夜间模式'}</span>
+          </button>
+          <button type="button" onClick={onToggleLocale}>
+            <Languages size={17} />
+            <span>{locale === 'zh-CN' ? 'Switch to English' : '切换中文'}</span>
+          </button>
+          {user?.role === 'admin' && (
+            <button type="button" onClick={onOpenAdmin}>
+              <Shield size={17} />
+              <span>管理员模式</span>
+            </button>
+          )}
+          <button type="button" className="danger-menu-item" onClick={onLogout}>
+            <LogOut size={17} />
+            <span>退出登录</span>
+          </button>
+        </div>
+      )}
+      <button type="button" className="user-dock-trigger" onClick={onToggleOpen} aria-expanded={open} title="账户菜单">
+        <UserAvatar user={user} />
+        <span>{userDisplayName(user)}</span>
+        {open ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
       </button>
     </div>
   )
@@ -649,6 +725,7 @@ function Composer({
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const usePlanner = useAppStore((s) => s.usePlanner)
   const setUsePlanner = useAppStore((s) => s.setUsePlanner)
+  const user = useAppStore((s) => s.user)
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
@@ -664,6 +741,7 @@ function Composer({
   const galleryAssets = useMemo(() => uniqueAssets([...visibleAssets, ...libraryAssets]), [visibleAssets, libraryAssets])
   const selectedAssets = galleryAssets.filter((asset) => selectedAssetIds.includes(asset.id))
   const composerCentered = !conversationStarted
+  const greeting = useMemo(() => buildComposerGreeting(user), [user?.display_name, user?.email])
 
   function chooseUploadFiles() {
     setAssetGalleryOpen(false)
@@ -894,8 +972,10 @@ function Composer({
       <form className={`composer ${composerCentered ? 'centered' : 'docked'}`} onSubmit={submit}>
         {composerCentered && (
           <div className="composer-greeting">
-            <Sparkles size={22} />
-            <h2>今天想画点什么？</h2>
+            <span className="greeting-logo">
+              <Sparkles size={18} />
+            </span>
+            <h2>{greeting}</h2>
           </div>
         )}
         {selectedAssets.length > 0 && (
@@ -1516,15 +1596,39 @@ function UserCenter({
 }) {
   const [data, setData] = useState<UsageResponse | null>(null)
   const [sessions, setSessions] = useState<Session[]>([])
-  const [tab, setTab] = useState<'overview' | 'sessions' | 'assets'>('overview')
+  const [tab, setTab] = useState<'profile' | 'billing' | 'sessions' | 'gallery'>('profile')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [avatarUploading, setAvatarUploading] = useState(false)
+  const [profileSaving, setProfileSaving] = useState(false)
+  const [passwordSaving, setPasswordSaving] = useState(false)
+  const [sessionQuery, setSessionQuery] = useState('')
+  const [profileDraft, setProfileDraft] = useState({ display_name: '', email: '' })
+  const [passwordDraft, setPasswordDraft] = useState({ current: '', next: '', confirm: '' })
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const avatarInputRef = useRef<HTMLInputElement | null>(null)
+  const user = useAppStore((s) => s.user)
+  const setUser = useAppStore((s) => s.setUser)
   const selectAsset = useAppStore((s) => s.selectAsset)
   const deselectAsset = useAppStore((s) => s.deselectAsset)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
+  const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const locale = useAppStore((s) => s.locale)
+  const galleryAssets = useMemo(() => uniqueAssets(data?.assets ?? []), [data?.assets])
+  const filteredSessions = useMemo(() => {
+    const keyword = sessionQuery.trim().toLowerCase()
+    if (!keyword) return sessions
+    return sessions.filter((session) => session.title.toLowerCase().includes(keyword))
+  }, [sessions, sessionQuery])
+  const activeCount = sessions.filter((session) => !session.archived_at).length
+  const archivedCount = sessions.length - activeCount
+
+  useEffect(() => {
+    if (!user) return
+    setProfileDraft({ display_name: user.display_name || '', email: user.email || '' })
+  }, [user?.display_name, user?.email])
 
   async function loadSessions() {
     const res = await api.listAllSessions()
@@ -1548,6 +1652,58 @@ function UserCenter({
   async function loadUsage() {
     const next = await api.usage()
     setData(next)
+  }
+
+  async function saveProfile(event: FormEvent) {
+    event.preventDefault()
+    setProfileSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      const res = await api.updateMe(profileDraft)
+      setUser(res.user)
+      setNotice('资料已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setProfileSaving(false)
+    }
+  }
+
+  async function savePassword(event: FormEvent) {
+    event.preventDefault()
+    if (passwordDraft.next !== passwordDraft.confirm) {
+      setError('两次输入的新密码不一致')
+      return
+    }
+    setPasswordSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      await api.updatePassword({ current_password: passwordDraft.current, new_password: passwordDraft.next })
+      setPasswordDraft({ current: '', next: '', confirm: '' })
+      setNotice('密码已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '修改密码失败')
+    } finally {
+      setPasswordSaving(false)
+    }
+  }
+
+  async function uploadAvatar(file: File | undefined) {
+    if (!file) return
+    setAvatarUploading(true)
+    setError('')
+    setNotice('')
+    try {
+      const res = await api.uploadAvatar(file)
+      setUser(res.user)
+      setNotice('头像已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '上传头像失败')
+    } finally {
+      setAvatarUploading(false)
+    }
   }
 
   async function useLibraryAsset(asset: Asset) {
@@ -1612,110 +1768,226 @@ function UserCenter({
   }, [])
 
   return (
-    <Overlay title="用户中心" onClose={onClose}>
+    <Overlay title="设置中心" onClose={onClose}>
       {error && <p className="form-error">{error}</p>}
+      {notice && <p className="form-success">{notice}</p>}
       {data ? (
-        <>
-          <div className="tabs center-tabs">
-            <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>
-              概览
+        <div className="settings-center">
+          <aside className="settings-nav">
+            <div className="settings-user-card">
+              <UserAvatar user={user} size="large" />
+              <div>
+                <strong>{userDisplayName(user)}</strong>
+                <span>{user?.email}</span>
+              </div>
+            </div>
+            <button type="button" className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}>
+              <UserRound size={17} />
+              <span>账户</span>
+            </button>
+            <button type="button" className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>
+              <CreditCard size={17} />
+              <span>账单</span>
             </button>
             <button type="button" className={tab === 'sessions' ? 'active' : ''} onClick={() => setTab('sessions')}>
-              对话管理
+              <MessageSquarePlus size={17} />
+              <span>对话</span>
             </button>
-            <button type="button" className={tab === 'assets' ? 'active' : ''} onClick={() => setTab('assets')}>
-              参考图
+            <button type="button" className={tab === 'gallery' ? 'active' : ''} onClick={() => setTab('gallery')}>
+              <Images size={17} />
+              <span>画廊</span>
             </button>
-          </div>
-          {tab === 'overview' && (
-            <>
-              <div className="metric-grid">
-                <Metric label="点数" value={data.summary.credits} />
-                <Metric label="生成" value={data.summary.generated_tasks} />
-                <Metric label="已完成" value={data.summary.completed_tasks} />
-                <Metric label="参考图" value={data.summary.reference_images} />
+          </aside>
+          <div className="settings-content">
+            {tab === 'profile' && (
+              <div className="settings-page">
+                <section className="profile-hero">
+                  <button type="button" className="avatar-uploader" onClick={() => avatarInputRef.current?.click()} title="上传头像">
+                    <UserAvatar user={user} size="large" />
+                    <span>{avatarUploading ? <Loader2 className="spin" size={16} /> : <Camera size={16} />}</span>
+                  </button>
+                  <input
+                    ref={avatarInputRef}
+                    className="hidden-file"
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => {
+                      uploadAvatar(event.target.files?.[0])
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                  <div>
+                    <h3>{userDisplayName(user)}</h3>
+                    <p>{user?.role === 'admin' ? '管理员账户' : '创作账户'}</p>
+                  </div>
+                </section>
+                <form className="profile-form" onSubmit={saveProfile}>
+                  <label>
+                    <span>
+                      <UserRound size={15} />
+                      名字
+                    </span>
+                    <input value={profileDraft.display_name} onChange={(e) => setProfileDraft((draft) => ({ ...draft, display_name: e.target.value }))} />
+                  </label>
+                  <label>
+                    <span>
+                      <Mail size={15} />
+                      邮箱
+                    </span>
+                    <input
+                      type="email"
+                      value={profileDraft.email}
+                      onChange={(e) => setProfileDraft((draft) => ({ ...draft, email: e.target.value }))}
+                    />
+                  </label>
+                  <button className="primary-button" disabled={profileSaving}>
+                    {profileSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />}
+                    保存资料
+                  </button>
+                </form>
+                <form className="profile-form password-form" onSubmit={savePassword}>
+                  <label>
+                    <span>
+                      <KeyRound size={15} />
+                      当前密码
+                    </span>
+                    <input
+                      type="password"
+                      value={passwordDraft.current}
+                      onChange={(e) => setPasswordDraft((draft) => ({ ...draft, current: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    <span>
+                      <Lock size={15} />
+                      新密码
+                    </span>
+                    <input
+                      type="password"
+                      minLength={8}
+                      value={passwordDraft.next}
+                      onChange={(e) => setPasswordDraft((draft) => ({ ...draft, next: e.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    <span>
+                      <KeyRound size={15} />
+                      确认密码
+                    </span>
+                    <input
+                      type="password"
+                      minLength={8}
+                      value={passwordDraft.confirm}
+                      onChange={(e) => setPasswordDraft((draft) => ({ ...draft, confirm: e.target.value }))}
+                    />
+                  </label>
+                  <button className="secondary-button" disabled={passwordSaving}>
+                    {passwordSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />}
+                    修改密码
+                  </button>
+                </form>
               </div>
-              <section className="panel-block">
-                <h3>账单</h3>
-                <div className="ledger-list">
-                  {(data.ledger ?? []).map((item) => (
-                    <div key={item.id}>
-                      <span>{localizeReason(locale, item.reason)}</span>
-                      <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
-                      <small>{new Date(item.created_at).toLocaleString()}</small>
+            )}
+            {tab === 'billing' && (
+              <div className="settings-page">
+                <div className="metric-grid billing-metrics">
+                  <Metric label="点数" value={data.summary.credits} />
+                  <Metric label="已生成" value={data.summary.generated_tasks} />
+                  <Metric label="已完成" value={data.summary.completed_tasks} />
+                  <Metric label="已消耗" value={data.summary.credits_spent} />
+                </div>
+                <section className="panel-block">
+                  <h3>账单明细</h3>
+                  <div className="ledger-list">
+                    {(data.ledger ?? []).map((item) => (
+                      <div key={item.id}>
+                        <span>{localizeReason(locale, item.reason)}</span>
+                        <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
+                        <small>{new Date(item.created_at).toLocaleString()}</small>
+                      </div>
+                    ))}
+                    {(data.ledger ?? []).length === 0 && <p className="empty-note">还没有账单记录</p>}
+                  </div>
+                </section>
+              </div>
+            )}
+            {tab === 'sessions' && (
+              <div className="settings-page">
+                <div className="conversation-toolbar">
+                  <div className="conversation-stats">
+                    <span>{activeCount} 个活跃</span>
+                    <span>{archivedCount} 个归档</span>
+                  </div>
+                  <input value={sessionQuery} onChange={(e) => setSessionQuery(e.target.value)} placeholder="搜索对话" />
+                </div>
+                <div className="conversation-list">
+                  {filteredSessions.map((session) => (
+                    <article key={session.id} className="conversation-item">
+                      <div>
+                        <strong title={session.title}>{session.title}</strong>
+                        <span>{new Date(session.updated_at).toLocaleString()}</span>
+                      </div>
+                      <code>{session.archived_at ? '已归档' : localizeStatus(locale, session.task_status || '') || '活跃'}</code>
+                      <div className="conversation-actions">
+                        <button className="icon-button" onClick={() => updateSessionArchive(session)} title={session.archived_at ? '恢复对话' : '归档对话'}>
+                          {session.archived_at ? <RotateCcw size={16} /> : <Archive size={16} />}
+                        </button>
+                        <button className="icon-button danger-button" onClick={() => permanentlyDeleteSession(session)} title="彻底删除">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                  {filteredSessions.length === 0 && <p className="empty-note">没有匹配的对话</p>}
+                </div>
+              </div>
+            )}
+            {tab === 'gallery' && (
+              <div className="settings-page">
+                <div className="gallery-toolbar">
+                  <label>
+                    上传到
+                    <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
+                      <option value="evolink">Evolink</option>
+                      <option value="maxqi">MaxQi</option>
+                    </select>
+                  </label>
+                  <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
+                    {uploading ? <Loader2 className="spin" size={16} /> : <ImagePlus size={16} />}
+                    上传图片
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    className="hidden-file"
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={(event) => {
+                      uploadLibraryAssets(event.target.files)
+                      event.currentTarget.value = ''
+                    }}
+                  />
+                </div>
+                <div className="gallery-grid">
+                  {galleryAssets.map((asset) => (
+                    <div key={asset.id} className="asset-tile gallery-tile" title={asset.file_name}>
+                      <img src={assetImageSrc(asset)} alt={asset.file_name} />
+                      <span className="asset-provider-badge">{providerLabel(asset)}</span>
+                      <button className="asset-use" type="button" onClick={() => useLibraryAsset(asset)} title="使用这张参考图">
+                        使用
+                      </button>
+                      <button className="asset-delete" type="button" onClick={() => deleteLibraryAsset(asset)} title="移除参考图">
+                        <X size={14} />
+                      </button>
+                      <button className="asset-preview-hit" type="button" onClick={() => setPreview(assetImageSrc(asset))} title="预览图片" />
                     </div>
                   ))}
                 </div>
-              </section>
-            </>
-          )}
-          {tab === 'sessions' && (
-            <section className="panel-block">
-              <h3>对话管理</h3>
-              <div className="session-manager">
-                {sessions.map((session) => (
-                  <div key={session.id} className="session-manager-row">
-                    <div>
-                      <strong title={session.title}>{session.title}</strong>
-                      <span>
-                        {session.archived_at
-                          ? `已归档 · ${new Date(session.archived_at).toLocaleString()}`
-                          : `活跃 · ${new Date(session.updated_at).toLocaleString()}`}
-                        {session.task_status ? ` · ${localizeStatus(locale, session.task_status)}` : ''}
-                      </span>
-                    </div>
-                    <button className="secondary-button" onClick={() => updateSessionArchive(session)}>
-                      {session.archived_at ? <RotateCcw size={16} /> : <Archive size={16} />}
-                      {session.archived_at ? '恢复' : '归档'}
-                    </button>
-                    <button className="secondary-button danger-button" onClick={() => permanentlyDeleteSession(session)}>
-                      <Trash2 size={16} />
-                      彻底删除
-                    </button>
-                  </div>
-                ))}
-                {sessions.length === 0 && <p className="empty-note">还没有对话</p>}
+                {galleryAssets.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
               </div>
-            </section>
-          )}
-          {tab === 'assets' && (
-            <section className="panel-block">
-              <div className="panel-title-row">
-                <h3>参考图</h3>
-                <button type="button" className="icon-button" onClick={() => fileInputRef.current?.click()} title="上传参考图">
-                  {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
-                </button>
-                <input
-                  ref={fileInputRef}
-                  className="hidden-file"
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={(event) => {
-                    uploadLibraryAssets(event.target.files)
-                    event.currentTarget.value = ''
-                  }}
-                />
-              </div>
-              <div className="asset-grid library">
-                {uniqueAssets(data.assets ?? []).map((asset) => (
-                  <div key={asset.id} className="asset-tile" title={asset.file_name}>
-                    <img src={assetImageSrc(asset)} alt={asset.file_name} />
-                    <span className="asset-provider-badge">{providerLabel(asset)}</span>
-                    <button className="asset-use" type="button" onClick={() => useLibraryAsset(asset)} title="使用这张参考图">
-                      使用
-                    </button>
-                    <button className="asset-delete" type="button" onClick={() => deleteLibraryAsset(asset)} title="移除参考图">
-                      <X size={14} />
-                    </button>
-                    <button className="asset-preview-hit" type="button" onClick={() => setPreview(assetImageSrc(asset))} title="预览图片" />
-                  </div>
-                ))}
-              </div>
-              {uniqueAssets(data.assets ?? []).length === 0 && <p className="empty-note">还没有参考图</p>}
-            </section>
-          )}
-        </>
+            )}
+          </div>
+        </div>
       ) : (
         <Loader2 className="spin" size={20} />
       )}
@@ -1797,6 +2069,51 @@ function Metric({ label, value, valueText }: { label: string; value?: number; va
       <strong>{valueText ?? value}</strong>
     </div>
   )
+}
+
+function userDisplayName(user: User | null) {
+  return user?.display_name?.trim() || user?.email?.split('@')[0] || 'PicTu 用户'
+}
+
+function initialsFor(name: string) {
+  const trimmed = name.trim()
+  if (!trimmed) return 'P'
+  const asciiParts = trimmed.split(/\s+/).filter(Boolean)
+  if (asciiParts.length > 1) {
+    return asciiParts
+      .slice(0, 2)
+      .map((part) => part[0])
+      .join('')
+      .toUpperCase()
+  }
+  return Array.from(trimmed).slice(0, 2).join('').toUpperCase()
+}
+
+function buildComposerGreeting(user: User | null) {
+  const name = userDisplayName(user)
+  const hour = new Date().getHours()
+  const dayKey = new Date().toISOString().slice(0, 10)
+  const seed = hashString(`${dayKey}:${name}:${Math.floor(hour / 6)}`)
+  const playful = [
+    `${name}，今天让画面先呼吸一下`,
+    `给 ${name} 留一盏灵感的小灯`,
+    `${name}，来一张会被记住的图`,
+    `今天的第一笔，交给 ${name}`,
+  ]
+  if (seed % 100 < 9) return playful[seed % playful.length]
+  if (hour < 5) return `Night, ${name}`
+  if (hour < 12) return `Morning, ${name}`
+  if (hour < 18) return `Afternoon, ${name}`
+  if (hour < 22) return `Evening, ${name}`
+  return `Night, ${name}`
+}
+
+function hashString(value: string) {
+  let hash = 0
+  for (const char of value) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0
+  }
+  return hash
 }
 
 function uniqueAssets(assets: Asset[]) {

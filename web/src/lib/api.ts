@@ -29,6 +29,15 @@ export const api = {
   login: (payload: { email: string; password: string }) =>
     request<AuthResponse>('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request<{ user: User }>('/api/me'),
+  updateMe: (payload: { email: string; display_name: string }) =>
+    request<{ user: User }>('/api/me', { method: 'PUT', body: JSON.stringify(payload) }),
+  updatePassword: (payload: { current_password: string; new_password: string }) =>
+    request<{ ok: true }>('/api/me/password', { method: 'PUT', body: JSON.stringify(payload) }),
+  uploadAvatar: (file: File) => {
+    const data = new FormData()
+    data.append('file', file)
+    return request<{ user: User }>('/api/me/avatar', { method: 'POST', body: data })
+  },
   listSessions: () => request<{ sessions: Session[] | null }>('/api/sessions'),
   listAllSessions: () => request<{ sessions: Session[] | null }>('/api/sessions/manage'),
   createSession: (title?: string) =>

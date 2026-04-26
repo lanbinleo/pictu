@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/mail"
 	"os"
 	"path"
 	"path/filepath"
@@ -64,6 +65,9 @@ func (s *Server) routes() *gin.Engine {
 	protected := api.Group("")
 	protected.Use(s.authMiddleware())
 	protected.GET("/me", s.me)
+	protected.PUT("/me", s.updateMe)
+	protected.PUT("/me/password", s.updatePassword)
+	protected.POST("/me/avatar", s.uploadAvatar)
 	protected.GET("/sessions", s.listSessions)
 	protected.GET("/sessions/manage", s.listAllSessions)
 	protected.POST("/sessions", s.createSession)
@@ -154,6 +158,98 @@ func (s *Server) me(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": fresh})
+}
+
+func (s *Server) updateMe(c *gin.Context) {
+	var req struct {
+		Email       string `json:"email" binding:"required"`
+		DisplayName string `json:"display_name"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		fail(c, http.StatusBadRequest, "invalid email")
+		return
+	}
+	user, err := s.store.UpdateUserProfile(c, currentUser(c), req.Email, req.DisplayName)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
+func (s *Server) updatePassword(c *gin.Context) {
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		fail(c, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	user := currentUser(c)
+	fresh, err := s.store.GetUserByID(c, user.ID)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	if !auth.CheckPassword(fresh.Password, req.CurrentPassword) {
+		fail(c, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	hash, err := auth.HashPassword(req.NewPassword)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.store.UpdateUserPassword(c, fresh, hash); err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) uploadAvatar(c *gin.Context) {
+	file, err := c.FormFile("file")
+	if err != nil {
+		fail(c, http.StatusBadRequest, "file is required")
+		return
+	}
+	if file.Size > 5*1024*1024 {
+		fail(c, http.StatusBadRequest, "file must be under 5MB")
+		return
+	}
+	if !validImage(file) {
+		fail(c, http.StatusBadRequest, "supported formats: jpeg, png, webp")
+		return
+	}
+	src, err := file.Open()
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer src.Close()
+	data, err := io.ReadAll(src)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	url, err := s.backupAvatarImage(data, currentUser(c), file.Filename, file.Header.Get("Content-Type"))
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user, err := s.store.UpdateUserAvatar(c, currentUser(c), url)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"user": user})
 }
 
 func (s *Server) listSessions(c *gin.Context) {
@@ -855,6 +951,33 @@ func (s *Server) backupReferenceImage(data []byte, user store.User, sessionID in
 		return "", err
 	}
 	name := hashPart + ext
+	target := filepath.Join(targetDir, name)
+	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(target, data, 0644); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	urlPath := path.Join(filepath.ToSlash(relDir), name)
+	return strings.TrimRight(s.cfg.Storage.PublicPrefix, "/") + "/" + urlPath, nil
+}
+
+func (s *Server) backupAvatarImage(data []byte, user store.User, fileName, mimeType string) (string, error) {
+	if len(data) == 0 || s.cfg.Storage.GeneratedDir == "" {
+		return "", nil
+	}
+	ext := referenceImageExt(fileName, mimeType)
+	hashPart := sha256Hex(data)
+	if len(hashPart) > 20 {
+		hashPart = hashPart[:20]
+	}
+	relDir := filepath.Join("avatars", fmt.Sprintf("tenant-%d", user.TenantID))
+	targetDir := filepath.Join(s.cfg.Storage.GeneratedDir, relDir)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("user-%d-%s%s", user.ID, hashPart, ext)
 	target := filepath.Join(targetDir, name)
 	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
 		if err := os.WriteFile(target, data, 0644); err != nil {

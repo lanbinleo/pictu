@@ -3,6 +3,7 @@ export type User = {
   tenant_id: number
   email: string
   display_name: string
+  avatar_url?: string
   role: string
   credits: number
   created_at: string

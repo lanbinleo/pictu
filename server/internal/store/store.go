@@ -27,6 +27,7 @@ type User struct {
 	Email       string    `json:"email"`
 	Password    string    `json:"-"`
 	DisplayName string    `json:"display_name"`
+	AvatarURL   string    `json:"avatar_url"`
 	Role        string    `json:"role"`
 	Credits     int       `json:"credits"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -247,6 +248,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "assets", "local_url", "text not null default ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "users", "avatar_url", "text not null default ''"); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `update users set role = 'admin'
 		where id = (select min(id) from users)
 		and not exists (select 1 from users where role = 'admin')`); err != nil {
@@ -304,8 +308,8 @@ func (s *Store) CreateUserWithTenant(ctx context.Context, email, passwordHash, d
 
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, role, credits, created_at from users where email = ?`, strings.ToLower(strings.TrimSpace(email))).
-		Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.Role, &u.Credits, &u.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, avatar_url, role, credits, created_at from users where email = ?`, strings.ToLower(strings.TrimSpace(email))).
+		Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.AvatarURL, &u.Role, &u.Credits, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -314,12 +318,65 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (User, error) 
 
 func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, role, credits, created_at from users where id = ?`, id).
-		Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.Role, &u.Credits, &u.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, avatar_url, role, credits, created_at from users where id = ?`, id).
+		Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.AvatarURL, &u.Role, &u.Credits, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
 	return u, err
+}
+
+func (s *Store) UpdateUserProfile(ctx context.Context, user User, email, displayName string) (User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	displayName = strings.TrimSpace(displayName)
+	if email == "" {
+		return User{}, errors.New("email is required")
+	}
+	if displayName == "" {
+		displayName = strings.Split(email, "@")[0]
+	}
+	res, err := s.db.ExecContext(ctx, `update users set email = ?, display_name = ? where id = ? and tenant_id = ?`, email, displayName, user.ID, user.TenantID)
+	if err != nil {
+		return User{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return User{}, err
+	}
+	if affected == 0 {
+		return User{}, ErrNotFound
+	}
+	return s.GetUserByID(ctx, user.ID)
+}
+
+func (s *Store) UpdateUserPassword(ctx context.Context, user User, passwordHash string) error {
+	res, err := s.db.ExecContext(ctx, `update users set password_hash = ? where id = ? and tenant_id = ?`, passwordHash, user.ID, user.TenantID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateUserAvatar(ctx context.Context, user User, avatarURL string) (User, error) {
+	res, err := s.db.ExecContext(ctx, `update users set avatar_url = ? where id = ? and tenant_id = ?`, strings.TrimSpace(avatarURL), user.ID, user.TenantID)
+	if err != nil {
+		return User{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return User{}, err
+	}
+	if affected == 0 {
+		return User{}, ErrNotFound
+	}
+	return s.GetUserByID(ctx, user.ID)
 }
 
 func (s *Store) CreateSession(ctx context.Context, user User, title string) (Session, error) {
@@ -773,7 +830,7 @@ func (s *Store) UsageSummary(ctx context.Context, user User) (UsageSummary, erro
 }
 
 func (s *Store) AdminListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, tenant_id, email, password_hash, display_name, role, credits, created_at from users order by id asc`)
+	rows, err := s.db.QueryContext(ctx, `select id, tenant_id, email, password_hash, display_name, avatar_url, role, credits, created_at from users order by id asc`)
 	if err != nil {
 		return nil, err
 	}
@@ -781,7 +838,7 @@ func (s *Store) AdminListUsers(ctx context.Context) ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.Role, &u.Credits, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.TenantID, &u.Email, &u.Password, &u.DisplayName, &u.AvatarURL, &u.Role, &u.Credits, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -802,8 +859,8 @@ func (s *Store) AdminAdjustCredits(ctx context.Context, admin User, targetUserID
 	}
 	defer tx.Rollback()
 	var target User
-	if err := tx.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, role, credits, created_at from users where id = ?`, targetUserID).
-		Scan(&target.ID, &target.TenantID, &target.Email, &target.Password, &target.DisplayName, &target.Role, &target.Credits, &target.CreatedAt); err != nil {
+	if err := tx.QueryRowContext(ctx, `select id, tenant_id, email, password_hash, display_name, avatar_url, role, credits, created_at from users where id = ?`, targetUserID).
+		Scan(&target.ID, &target.TenantID, &target.Email, &target.Password, &target.DisplayName, &target.AvatarURL, &target.Role, &target.Credits, &target.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrNotFound
 		}
