@@ -43,8 +43,18 @@ func New(cfg config.Config, st *store.Store, ev *evolink.Client) *Server {
 }
 
 func (s *Server) Run() error {
+	go s.backgroundBackfill()
 	addr := fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port)
 	return s.router.Run(addr)
+}
+
+func (s *Server) backgroundBackfill() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	s.BackfillLocalImages(context.Background())
+	for range ticker.C {
+		s.BackfillLocalImages(context.Background())
+	}
 }
 
 func (s *Server) routes() *gin.Engine {
@@ -89,6 +99,8 @@ func (s *Server) routes() *gin.Engine {
 	admin.Use(requireAdmin())
 	admin.GET("/users", s.adminUsers)
 	admin.POST("/users/:id/credits", s.adminAdjustCredits)
+	admin.GET("/stats", s.adminStats)
+	admin.GET("/ledger", s.adminLedger)
 
 	s.serveFrontend(r)
 	return r
@@ -162,17 +174,26 @@ func (s *Server) me(c *gin.Context) {
 
 func (s *Server) updateMe(c *gin.Context) {
 	var req struct {
-		Email       string `json:"email" binding:"required"`
-		DisplayName string `json:"display_name"`
+		Email       *string `json:"email"`
+		DisplayName *string `json:"display_name"`
 	}
 	if !bind(c, &req) {
 		return
 	}
-	if _, err := mail.ParseAddress(req.Email); err != nil {
+	current := currentUser(c)
+	email := current.Email
+	displayName := current.DisplayName
+	if req.Email != nil {
+		email = strings.TrimSpace(*req.Email)
+	}
+	if req.DisplayName != nil {
+		displayName = strings.TrimSpace(*req.DisplayName)
+	}
+	if _, err := mail.ParseAddress(email); err != nil {
 		fail(c, http.StatusBadRequest, "invalid email")
 		return
 	}
-	user, err := s.store.UpdateUserProfile(c, currentUser(c), req.Email, req.DisplayName)
+	user, err := s.store.UpdateUserProfile(c, current, email, displayName)
 	if err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
@@ -353,7 +374,11 @@ func (s *Server) getSession(c *gin.Context) {
 }
 
 func (s *Server) listAssets(c *gin.Context) {
-	assets, err := s.store.ListUserAssets(c, currentUser(c), 200)
+	limit := 500
+	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+	assets, err := s.store.ListUserAssets(c, currentUser(c), limit)
 	if err != nil {
 		statusFromErr(c, err)
 		return
@@ -796,6 +821,40 @@ func (s *Server) adminAdjustCredits(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"user": user})
+}
+
+func (s *Server) adminStats(c *gin.Context) {
+	granularity := c.DefaultQuery("granularity", "hour")
+	if granularity != "hour" && granularity != "day" {
+		fail(c, http.StatusBadRequest, "invalid granularity")
+		return
+	}
+	window := 24
+	if granularity == "day" {
+		window = 30
+	}
+	if d, err := strconv.Atoi(c.Query("days")); err == nil && d > 0 && d <= 365 {
+		window = d
+	}
+	stats, err := s.store.AdminStats(c, granularity, window)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
+func (s *Server) adminLedger(c *gin.Context) {
+	limit := 200
+	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 1000 {
+		limit = l
+	}
+	entries, err := s.store.AdminListLedger(c, limit)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"entries": entries})
 }
 
 func (s *Server) pollTask(providerTaskID string) {

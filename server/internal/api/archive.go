@@ -139,3 +139,21 @@ func sanitizeFilePart(input string) string {
 	}
 	return b.String()
 }
+
+func (s *Server) BackfillLocalImages(ctx context.Context) {
+	if err := os.MkdirAll(s.cfg.Storage.GeneratedDir, 0755); err != nil {
+		return
+	}
+	assets, err := s.store.ListPendingDownloads(ctx, 50)
+	if err != nil || len(assets) == 0 {
+		return
+	}
+	client := http.Client{Timeout: 90 * time.Second}
+	for _, asset := range assets {
+		localURL, err := s.downloadImage(ctx, client, fmt.Sprintf("backfill-%d", asset.ID), 0, asset.URL)
+		if err != nil || localURL == "" {
+			continue
+		}
+		_ = s.store.SetAssetLocalURLByID(ctx, asset.ID, localURL)
+	}
+}

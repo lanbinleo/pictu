@@ -503,6 +503,7 @@ func (s *Store) DeleteSession(ctx context.Context, user User, id int64) error {
 func (s *Store) DeleteEmptySessions(ctx context.Context, user User) error {
 	_, err := s.db.ExecContext(ctx, `delete from sessions
 		where tenant_id = ? and user_id = ? and archived_at is null
+		and title in ('未命名会话', 'New image session')
 		and not exists (select 1 from messages where messages.session_id = sessions.id)
 		and not exists (select 1 from assets where assets.session_id = sessions.id)
 		and not exists (select 1 from tasks where tasks.session_id = sessions.id)`, user.TenantID, user.ID)
@@ -607,8 +608,8 @@ func (s *Store) ListAssets(ctx context.Context, user User, sessionID int64) ([]A
 }
 
 func (s *Store) ListUserAssets(ctx context.Context, user User, limit int) ([]Asset, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 100
+	if limit <= 0 || limit > 500 {
+		limit = 200
 	}
 	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, created_at from assets where tenant_id = ? order by id desc limit ?`, user.TenantID, limit)
 	if err != nil {
@@ -624,6 +625,32 @@ func (s *Store) ListUserAssets(ctx context.Context, user User, limit int) ([]Ass
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) ListPendingDownloads(ctx context.Context, limit int) ([]Asset, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `select a.id, a.session_id, a.user_id, a.file_name, a.mime_type, a.url, a.local_url, a.size_bytes, a.provider, a.content_hash, a.created_at
+		from assets a where a.local_url = '' and a.url != '' and a.url like 'http%' order by a.id desc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Asset
+	for rows.Next() {
+		var item Asset
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.LocalURL, &item.SizeBytes, &item.Provider, &item.ContentHash, &item.CreatedAt); err != nil {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) SetAssetLocalURLByID(ctx context.Context, id int64, localURL string) error {
+	_, err := s.db.ExecContext(ctx, `update assets set local_url = ? where id = ?`, localURL, id)
+	return err
 }
 
 func (s *Store) DeleteAsset(ctx context.Context, user User, id int64) error {
@@ -844,6 +871,112 @@ func (s *Store) AdminListUsers(ctx context.Context) ([]User, error) {
 		users = append(users, u)
 	}
 	return users, rows.Err()
+}
+
+type AdminStats struct {
+	TotalUsers    int           `json:"total_users"`
+	TotalSessions int           `json:"total_sessions"`
+	TotalTasks    int           `json:"total_tasks"`
+	TotalCredits  int           `json:"total_credits_spent"`
+	DailyUsage    []DailyBucket `json:"daily_usage"`
+	UsageBuckets  []UsageBucket `json:"usage_buckets"`
+}
+
+type DailyBucket struct {
+	Date    string `json:"date"`
+	Tasks   int    `json:"tasks"`
+	Credits int    `json:"credits"`
+}
+
+type UsageBucket struct {
+	Period       string `json:"period"`
+	Tasks        int    `json:"tasks"`
+	Credits      int    `json:"credits"`
+	TextCredits  int    `json:"text_credits"`
+	ImageCredits int    `json:"image_credits"`
+}
+
+func (s *Store) AdminStats(ctx context.Context, granularity string, window int) (AdminStats, error) {
+	var stats AdminStats
+	if err := s.db.QueryRowContext(ctx, `select count(*) from users`).Scan(&stats.TotalUsers); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `select count(*) from sessions`).Scan(&stats.TotalSessions); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `select count(*) from tasks`).Scan(&stats.TotalTasks); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `select coalesce(sum(-delta),0) from credit_ledger where delta < 0 and reason in ('image_generation', 'llm_reply')`).Scan(&stats.TotalCredits); err != nil {
+		return stats, err
+	}
+
+	bucketExpr := "date(created_at)"
+	modifier := fmt.Sprintf("-%d days", window)
+	if granularity == "hour" {
+		bucketExpr = "strftime('%Y-%m-%d %H:00', created_at)"
+		modifier = fmt.Sprintf("-%d hours", window)
+	}
+
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		select %s as bucket,
+			sum(case when reason = 'image_generation' then 1 else 0 end) as tasks,
+			coalesce(sum(-delta), 0) as credits,
+			coalesce(sum(case when reason = 'llm_reply' then -delta else 0 end), 0) as text_credits,
+			coalesce(sum(case when reason = 'image_generation' then -delta else 0 end), 0) as image_credits
+		from credit_ledger
+		where delta < 0
+			and reason in ('image_generation', 'llm_reply')
+			and created_at >= datetime('now', ?)
+		group by bucket
+		order by bucket asc`, bucketExpr), modifier)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b UsageBucket
+		if err := rows.Scan(&b.Period, &b.Tasks, &b.Credits, &b.TextCredits, &b.ImageCredits); err != nil {
+			return stats, err
+		}
+		stats.UsageBuckets = append(stats.UsageBuckets, b)
+		stats.DailyUsage = append(stats.DailyUsage, DailyBucket{Date: b.Period, Tasks: b.Tasks, Credits: b.Credits})
+	}
+	return stats, rows.Err()
+}
+
+type AdminLedgerEntry struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	UserEmail string    `json:"user_email"`
+	Delta     int       `json:"delta"`
+	Balance   int       `json:"balance"`
+	Reason    string    `json:"reason"`
+	RefID     string    `json:"ref_id"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (s *Store) AdminListLedger(ctx context.Context, limit int) ([]AdminLedgerEntry, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		select cl.id, cl.user_id, u.email, cl.delta, cl.balance, cl.reason, cl.ref_id, cl.created_at
+		from credit_ledger cl join users u on u.id = cl.user_id
+		order by cl.id desc limit ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []AdminLedgerEntry
+	for rows.Next() {
+		var e AdminLedgerEntry
+		if err := rows.Scan(&e.ID, &e.UserID, &e.UserEmail, &e.Delta, &e.Balance, &e.Reason, &e.RefID, &e.CreatedAt); err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }
 
 func (s *Store) AdminAdjustCredits(ctx context.Context, admin User, targetUserID int64, delta int, reason string) (User, error) {
