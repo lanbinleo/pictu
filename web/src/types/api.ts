@@ -27,6 +27,8 @@ export type Asset = {
   mime_type: string
   url: string
   size_bytes: number
+  provider: string
+  content_hash: string
   created_at: string
 }
 
@@ -115,6 +117,7 @@ export type GenerateResponse = {
 export type StreamEvent =
   | { type: 'content'; text: string }
   | { type: 'thinking'; text: string }
+  | { type: 'tool'; phase: 'preparing' | 'calling'; text?: string; prompt?: string }
   | ({ type: 'confirm' } & GenerateResponse)
   | ({ type: 'done' } & GenerateResponse)
   | { type: 'error'; error: string }

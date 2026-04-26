@@ -15,17 +15,23 @@ type AppState = {
     count: number
   }
   theme: 'light' | 'dark'
+  locale: 'zh-CN' | 'en-US'
   uploadProvider: string
+  usePlanner: boolean
   setAuth: (token: string, user: User) => void
   clearAuth: () => void
   setUser: (user: User) => void
   setActiveSessionId: (id: number | null) => void
   setDraft: (draft: string) => void
   toggleAsset: (id: number) => void
+  selectAsset: (id: number) => void
+  deselectAsset: (id: number) => void
   clearSelectedAssets: () => void
   setSettings: (settings: Partial<AppState['settings']>) => void
   toggleTheme: () => void
+  setLocale: (locale: AppState['locale']) => void
   setUploadProvider: (provider: string) => void
+  setUsePlanner: (usePlanner: boolean) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -43,7 +49,9 @@ export const useAppStore = create<AppState>()(
         count: 1,
       },
       theme: 'light',
+      locale: 'zh-CN',
       uploadProvider: 'evolink',
+      usePlanner: true,
       setAuth: (token, user) => set({ token, user }),
       clearAuth: () => set({ token: '', user: null, activeSessionId: null, selectedAssetIds: [] }),
       setUser: (user) => set({ user }),
@@ -55,10 +63,17 @@ export const useAppStore = create<AppState>()(
             ? state.selectedAssetIds.filter((assetId) => assetId !== id)
             : [...state.selectedAssetIds, id],
         })),
+      selectAsset: (id) =>
+        set((state) => ({
+          selectedAssetIds: state.selectedAssetIds.includes(id) ? state.selectedAssetIds : [...state.selectedAssetIds, id],
+        })),
+      deselectAsset: (id) => set((state) => ({ selectedAssetIds: state.selectedAssetIds.filter((assetId) => assetId !== id) })),
       clearSelectedAssets: () => set({ selectedAssetIds: [] }),
       setSettings: (settings) => set((state) => ({ settings: { ...state.settings, ...settings } })),
       toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
+      setLocale: (locale) => set({ locale }),
       setUploadProvider: (provider) => set({ uploadProvider: provider }),
+      setUsePlanner: (usePlanner) => set({ usePlanner }),
     }),
     {
       name: 'pictu-app-state',
@@ -69,7 +84,9 @@ export const useAppStore = create<AppState>()(
         draft: state.draft,
         settings: state.settings,
         theme: state.theme,
+        locale: state.locale,
         uploadProvider: state.uploadProvider,
+        usePlanner: state.usePlanner,
       }),
     },
   ),

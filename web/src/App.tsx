@@ -27,6 +27,7 @@ import {
 import { api } from './lib/api'
 import { useAppStore } from './store/appStore'
 import type { Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageResponse, User } from './types/api'
+import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from './i18n'
 
 type Overlay = 'account' | 'admin' | null
 type PendingRequest = {
@@ -37,6 +38,12 @@ type PendingRequest = {
   settings: { size: string; resolution: string; quality: string; count: number }
 }
 type GenerationSettingsValue = PendingRequest['settings']
+type ToolDraft = {
+  sessionId: number
+  phase: 'preparing' | 'calling'
+  prompt: string
+  raw: string
+}
 
 export function App() {
   const token = useAppStore((s) => s.token)
@@ -142,6 +149,8 @@ function Workspace() {
   const setUser = useAppStore((s) => s.setUser)
   const theme = useAppStore((s) => s.theme)
   const toggleTheme = useAppStore((s) => s.toggleTheme)
+  const locale = useAppStore((s) => s.locale)
+  const setLocale = useAppStore((s) => s.setLocale)
   const [sessions, setSessions] = useState<Session[]>([])
   const [detail, setDetail] = useState<SessionDetail | null>(null)
   const [mobilePanel, setMobilePanel] = useState(false)
@@ -153,11 +162,25 @@ function Workspace() {
   const [optimisticMessages, setOptimisticMessages] = useState<Record<number, Message[]>>({})
   const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null)
   const [completedNotices, setCompletedNotices] = useState<Record<number, boolean>>({})
+  const [toolDraft, setToolDraft] = useState<ToolDraft | null>(null)
 
   async function refreshSessions() {
     const res = await api.listSessions()
     const items = res.sessions ?? []
-    setSessions(items)
+    setSessions((previous) => {
+      const previousByID = new Map(previous.map((session) => [session.id, session.task_status]))
+      const newNotices: Record<number, boolean> = {}
+      for (const item of items) {
+        const before = previousByID.get(item.id)
+        if ((before === 'pending' || before === 'processing') && item.task_status === 'completed') {
+          newNotices[item.id] = true
+        }
+      }
+      if (Object.keys(newNotices).length > 0) {
+        setCompletedNotices((current) => ({ ...current, ...newNotices }))
+      }
+      return items
+    })
     if (!activeSessionId && items[0]) {
       setActiveSessionId(items[0].id)
     } else if (activeSessionId && !items.some((item) => item.id === activeSessionId)) {
@@ -237,15 +260,28 @@ function Workspace() {
     return () => window.clearInterval(timer)
   }, [sessions])
 
+  useEffect(() => {
+    if (streamingSessionId !== activeSessionId && (!toolDraft || toolDraft.sessionId !== activeSessionId)) return
+    const latest = detail?.tasks?.[0]
+    if (latest?.status === 'completed' || latest?.status === 'failed') {
+      setStreamingText('')
+      setThinkingText('')
+      setStreamingSessionId(null)
+      setToolDraft(null)
+    }
+  }, [detail?.tasks, toolDraft, activeSessionId, streamingSessionId])
+
   const tasks = detail?.tasks ?? []
   const assets = detail?.assets ?? []
   const messages = detail?.messages ?? []
   const visibleStreamingText = streamingSessionId === activeSessionId ? streamingText : ''
   const visibleThinkingText = streamingSessionId === activeSessionId ? thinkingText : ''
+  const visibleToolDraft = toolDraft?.sessionId === activeSessionId ? toolDraft : null
   const visibleOptimisticMessages = activeSessionId ? optimisticMessages[activeSessionId] ?? [] : []
 
   return (
     <main className="app-shell">
+      {mobilePanel && <button className="mobile-panel-scrim" aria-label="关闭会话列表" onClick={() => setMobilePanel(false)} />}
       <aside className={`session-panel ${mobilePanel ? 'open' : ''}`}>
         <div className="panel-head">
           <div className="brand-mark compact">
@@ -296,6 +332,9 @@ function Workspace() {
             <button className="icon-button" onClick={toggleTheme} title="切换明暗模式">
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
             </button>
+            <button className="icon-button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')} title="切换语言">
+              {locale === 'zh-CN' ? '中' : 'EN'}
+            </button>
             <button className="icon-button" onClick={clearAuth} title="退出登录">
               <LogOut size={18} />
             </button>
@@ -314,7 +353,14 @@ function Workspace() {
           </button>
         </header>
         {error && <p className="inline-error">{error}</p>}
-        <MessageStream messages={[...messages, ...visibleOptimisticMessages]} tasks={tasks} streamingText={visibleStreamingText} thinkingText={visibleThinkingText} />
+        <MessageStream
+          messages={[...messages, ...visibleOptimisticMessages]}
+          tasks={tasks}
+          streamingText={visibleStreamingText}
+          thinkingText={visibleThinkingText}
+          toolDraft={visibleToolDraft}
+          locale={locale}
+        />
         <Composer
           sessionId={activeSessionId}
           assets={assets}
@@ -327,6 +373,7 @@ function Workspace() {
           setStreamingText={setStreamingText}
           setThinkingText={setThinkingText}
           setStreamingSessionId={setStreamingSessionId}
+          setToolDraft={setToolDraft}
           setOptimisticMessages={setOptimisticMessages}
           pendingRequest={pendingRequest?.sessionId === activeSessionId ? pendingRequest : null}
           setPendingRequest={setPendingRequest}
@@ -334,11 +381,11 @@ function Workspace() {
       </section>
 
       <aside className="asset-panel">
-        <AssetRack sessionId={activeSessionId} assets={assets} onChanged={() => refreshDetail()} />
+        <AssetRack sessionId={activeSessionId} assets={assets} onChanged={() => refreshWorkspace()} />
         <GenerationSettings />
       </aside>
 
-      {overlay === 'account' && <UserCenter onClose={() => setOverlay(null)} onSessionsChanged={refreshWorkspace} />}
+      {overlay === 'account' && <UserCenter activeSessionId={activeSessionId} onClose={() => setOverlay(null)} onSessionsChanged={refreshWorkspace} />}
       {overlay === 'admin' && user?.role === 'admin' && <AdminPanel onClose={() => setOverlay(null)} />}
     </main>
   )
@@ -348,7 +395,7 @@ function SessionDot({ session, hasRequest, completedNotice }: { session: Session
   let cls = ''
   if (hasRequest) cls = 'request'
   else if (session.task_status === 'pending' || session.task_status === 'processing') cls = 'working'
-  else if (session.task_status === 'completed' && completedNotice !== false) cls = 'done'
+  else if (session.task_status === 'completed' && completedNotice === true) cls = 'done'
   if (!cls) return <span className="session-dot empty" />
   return <span className={`session-dot ${cls}`} />
 }
@@ -396,30 +443,43 @@ function MessageStream({
   tasks,
   streamingText,
   thinkingText,
+  toolDraft,
+  locale,
 }: {
   messages: Message[]
   tasks: Task[]
   streamingText: string
   thinkingText: string
+  toolDraft: ToolDraft | null
+  locale: Locale
 }) {
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, tasks.length, streamingText, thinkingText])
+  }, [messages.length, tasks.length, streamingText, thinkingText, toolDraft?.prompt, toolDraft?.phase])
 
   const latestTask = tasks[0]
   const resultImages = useMemo(() => extractImages(latestTask), [latestTask?.result_json])
+  const liveTurn = Boolean(thinkingText || streamingText || toolDraft)
+  const visibleMessages = useMemo(() => {
+    if (!liveTurn) return messages
+    return messages.filter((msg) => {
+      if (msg.role !== 'assistant') return true
+      if (latestTask?.provider_task_id && msg.task_id === latestTask.provider_task_id) return false
+      return !(msg.prompt && latestTask)
+    })
+  }, [messages, liveTurn, latestTask])
 
   return (
     <div className="message-stream">
-      {messages.length === 0 && (
+      {visibleMessages.length === 0 && !liveTurn && (
         <div className="empty-state">
           <Sparkles size={24} />
           <h2>开始一张图</h2>
         </div>
       )}
-      {messages.map((msg) => (
+      {visibleMessages.map((msg) => (
         <article className={`message ${msg.role}`} key={msg.id}>
           <MarkdownText text={msg.content} />
           {msg.prompt && (
@@ -430,12 +490,37 @@ function MessageStream({
           )}
         </article>
       ))}
+      {(thinkingText || streamingText) && (
+        <article className="message assistant streaming-message">
+          {thinkingText && (
+            <details>
+              <summary>思考</summary>
+              <pre>{thinkingText}</pre>
+            </details>
+          )}
+          {streamingText && <MarkdownText text={streamingText} />}
+        </article>
+      )}
+      {toolDraft && (
+        <article className="task-card tool-draft-card">
+          <div className="task-meta">
+            <span>{translate(locale, `tool.${toolDraft.phase}`)}</span>
+            <Loader2 className="spin" size={16} />
+          </div>
+          {toolDraft.prompt && (
+            <details open>
+              <summary>{translate(locale, 'tool.prompt')}</summary>
+              <pre>{toolDraft.prompt}</pre>
+            </details>
+          )}
+        </article>
+      )}
       {latestTask && (
         <article className="task-card">
           {latestTask.status !== 'completed' && (
             <>
               <div className="task-meta">
-                <span>{latestTask.status}</span>
+                <span>{localizeStatus(locale, latestTask.status)}</span>
                 <strong>{latestTask.progress}%</strong>
               </div>
               <div className="progress">
@@ -455,17 +540,6 @@ function MessageStream({
           )}
         </article>
       )}
-      {(thinkingText || streamingText) && (
-        <article className="message assistant streaming-message">
-          {thinkingText && (
-            <details>
-              <summary>Thinking</summary>
-              <pre>{thinkingText}</pre>
-            </details>
-          )}
-          {streamingText && <MarkdownText text={streamingText} />}
-        </article>
-      )}
       <div ref={bottomRef} />
       {preview && <ImageLightbox src={preview} onClose={() => setPreview(null)} />}
     </div>
@@ -479,6 +553,7 @@ function Composer({
   setStreamingText,
   setThinkingText,
   setStreamingSessionId,
+  setToolDraft,
   setOptimisticMessages,
   pendingRequest,
   setPendingRequest,
@@ -489,6 +564,7 @@ function Composer({
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
   setThinkingText: React.Dispatch<React.SetStateAction<string>>
   setStreamingSessionId: React.Dispatch<React.SetStateAction<number | null>>
+  setToolDraft: React.Dispatch<React.SetStateAction<ToolDraft | null>>
   setOptimisticMessages: React.Dispatch<React.SetStateAction<Record<number, Message[]>>>
   pendingRequest: PendingRequest | null
   setPendingRequest: React.Dispatch<React.SetStateAction<PendingRequest | null>>
@@ -497,11 +573,15 @@ function Composer({
   const setDraft = useAppStore((s) => s.setDraft)
   const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
   const toggleAsset = useAppStore((s) => s.toggleAsset)
+  const selectAsset = useAppStore((s) => s.selectAsset)
+  const deselectAsset = useAppStore((s) => s.deselectAsset)
   const clearSelectedAssets = useAppStore((s) => s.clearSelectedAssets)
   const settings = useAppStore((s) => s.settings)
   const setSettings = useAppStore((s) => s.setSettings)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
+  const usePlanner = useAppStore((s) => s.usePlanner)
+  const setUsePlanner = useAppStore((s) => s.setUsePlanner)
   const [busy, setBusy] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
@@ -509,14 +589,11 @@ function Composer({
   const [moreOpen, setMoreOpen] = useState(false)
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const selectedAssets = assets.filter((asset) => selectedAssetIds.includes(asset.id))
+  const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
+  const selectedAssets = visibleAssets.filter((asset) => selectedAssetIds.includes(asset.id))
 
   function openMore() {
-    if (window.matchMedia('(max-width: 980px)').matches) {
-      setMoreOpen(true)
-      return
-    }
-    fileInputRef.current?.click()
+    setMoreOpen((open) => !open)
   }
 
   function chooseUploadFiles() {
@@ -536,9 +613,14 @@ function Composer({
     setBusy(true)
     setError('')
     try {
+      if (extra?.confirmed && extra.prompt) {
+        setStreamingSessionId(targetSessionId)
+        setToolDraft({ sessionId: targetSessionId, phase: 'calling', prompt: extra.prompt, raw: '' })
+      }
       const res = await api.generate(targetSessionId, {
         message,
         asset_ids: assetIds,
+        use_planner: usePlanner,
         ...baseSettings,
         ...extra,
       })
@@ -557,6 +639,7 @@ function Composer({
         clearSelectedAssets()
       }
       await onChanged()
+      setToolDraft(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
     } finally {
@@ -591,14 +674,17 @@ function Composer({
     setStreamingSessionId(sessionId)
     setStreamingText('')
     setThinkingText('')
+    setToolDraft(null)
     let keepStream = false
     let completed = false
+    let toolUsed = false
     try {
       await api.generateStream(
         sessionId,
         {
           message: submitted,
           asset_ids: submittedAssetIds,
+          use_planner: usePlanner,
           ...submittedSettings,
         },
         (event) => {
@@ -608,6 +694,7 @@ function Composer({
             setThinkingText((text) => text + event.text)
           } else if (event.type === 'confirm') {
             keepStream = true
+            toolUsed = true
             setPendingRequest({ sessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
             setModalSettings({
               size: event.plan.size,
@@ -617,8 +704,24 @@ function Composer({
             })
           } else if (event.type === 'done') {
             completed = true
+            if (event.plan?.tool_called) {
+              toolUsed = true
+              setToolDraft((current) =>
+                current?.sessionId === sessionId
+                  ? { ...current, phase: 'calling', prompt: event.plan.prompt || current.prompt }
+                  : { sessionId, phase: 'calling', prompt: event.plan.prompt, raw: '' },
+              )
+            }
           } else if (event.type === 'error') {
             setError(event.error)
+          } else if (event.type === 'tool') {
+            toolUsed = true
+            setToolDraft((current) => ({
+              sessionId,
+              phase: event.phase,
+              raw: (current?.sessionId === sessionId ? current.raw : '') + (event.text ?? ''),
+              prompt: event.prompt ?? current?.prompt ?? '',
+            }))
           }
         },
       )
@@ -630,9 +733,12 @@ function Composer({
         await onChanged()
       }
       if (!keepStream) {
-        setStreamingText('')
-        setThinkingText('')
-        setStreamingSessionId(null)
+        if (!toolUsed) {
+          setStreamingText('')
+          setThinkingText('')
+          setStreamingSessionId(null)
+          setToolDraft(null)
+        }
       }
     }
   }
@@ -659,7 +765,7 @@ function Composer({
       for (const file of Array.from(files)) {
         if (file.type.startsWith('image/')) {
           const res = await api.uploadAsset(sessionId, file, uploadProvider)
-          toggleAsset(res.asset.id)
+          selectAsset(res.asset.id)
         }
       }
       await onChanged()
@@ -679,6 +785,9 @@ function Composer({
               <span key={asset.id} title={asset.file_name}>
                 <img src={asset.url} alt={asset.file_name} />
                 图{index + 1}
+                <button type="button" className="selected-remove" onClick={() => deselectAsset(asset.id)} title="移除参考图">
+                  <X size={13} />
+                </button>
               </span>
             ))}
           </div>
@@ -709,6 +818,13 @@ function Composer({
             rows={3}
           />
           <div className="composer-actions">
+            {moreOpen && (
+              <ComposerMorePopover
+                usePlanner={usePlanner}
+                setUsePlanner={setUsePlanner}
+                onUpload={() => setUploadDialogOpen(true)}
+              />
+            )}
             <button type="button" className="icon-button" onClick={openMore} title="更多">
               {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
             </button>
@@ -719,20 +835,15 @@ function Composer({
         </div>
         {error && <p className="form-error">{error}</p>}
       </form>
-      <div className="upload-provider desktop-upload-provider">
-        <span>上传到</span>
-        <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
-          <option value="evolink">Evolink</option>
-          <option value="maxqi">MaxQi</option>
-        </select>
-      </div>
       {moreOpen && (
         <MobileMoreDrawer
-          assets={assets}
+          assets={visibleAssets}
           selectedAssetIds={selectedAssetIds}
           toggleAsset={toggleAsset}
           settings={settings}
           setSettings={setSettings}
+          usePlanner={usePlanner}
+          setUsePlanner={setUsePlanner}
           onClose={() => setMoreOpen(false)}
           onUpload={() => setUploadDialogOpen(true)}
         />
@@ -782,12 +893,37 @@ function withReferenceMarkdown(text: string, assets: Asset[]) {
   return `${text}\n\n${refs}`
 }
 
+function ComposerMorePopover({
+  usePlanner,
+  setUsePlanner,
+  onUpload,
+}: {
+  usePlanner: boolean
+  setUsePlanner: (usePlanner: boolean) => void
+  onUpload: () => void
+}) {
+  return (
+    <div className="composer-more-popover">
+      <label className="switch-row">
+        <span>经过 AI Planner</span>
+        <input type="checkbox" checked={usePlanner} onChange={(event) => setUsePlanner(event.target.checked)} />
+      </label>
+      <button type="button" className="secondary-button" onClick={onUpload}>
+        <ImagePlus size={16} />
+        上传参考图
+      </button>
+    </div>
+  )
+}
+
 function MobileMoreDrawer({
   assets,
   selectedAssetIds,
   toggleAsset,
   settings,
   setSettings,
+  usePlanner,
+  setUsePlanner,
   onClose,
   onUpload,
 }: {
@@ -796,6 +932,8 @@ function MobileMoreDrawer({
   toggleAsset: (id: number) => void
   settings: GenerationSettingsValue
   setSettings: (settings: Partial<GenerationSettingsValue>) => void
+  usePlanner: boolean
+  setUsePlanner: (usePlanner: boolean) => void
   onClose: () => void
   onUpload: () => void
 }) {
@@ -836,6 +974,10 @@ function MobileMoreDrawer({
         <div className="drawer-pages">
           <div className="drawer-track" style={{ transform: `translateX(-${page * 50}%)` }}>
             <div className="drawer-page">
+              <label className="switch-row drawer-switch">
+                <span>经过 AI Planner</span>
+                <input type="checkbox" checked={usePlanner} onChange={(event) => setUsePlanner(event.target.checked)} />
+              </label>
               <button type="button" className="drawer-tool" onClick={onUpload}>
                 <ImagePlus size={22} />
                 <span>上传参考图</span>
@@ -877,6 +1019,7 @@ function SettingsControls({
   settings: GenerationSettingsValue
   setSettings: (settings: Partial<GenerationSettingsValue>) => void
 }) {
+  const locale = useAppStore((s) => s.locale)
   return (
     <div className="settings-controls">
       <label title="比例为 auto 时，resolution 不参与尺寸推导。">
@@ -899,7 +1042,9 @@ function SettingsControls({
         质量
         <select value={settings.quality} onChange={(e) => setSettings({ quality: e.target.value })}>
           {['low', 'medium', 'high'].map((item) => (
-            <option key={item}>{item}</option>
+            <option key={item} value={item}>
+              {localizeQuality(locale, item)}
+            </option>
           ))}
         </select>
       </label>
@@ -985,6 +1130,7 @@ function PlanConfirmDialog({
   onContinue: () => void
   onCancel: () => void
 }) {
+  const locale = useAppStore((s) => s.locale)
   return (
     <div className="overlay">
       <section className="overlay-panel confirm-panel">
@@ -1020,7 +1166,9 @@ function PlanConfirmDialog({
               </select>
               <select value={modalSettings.quality} onChange={(e) => setModalSettings({ ...modalSettings, quality: e.target.value })}>
                 {['low', 'medium', 'high'].map((item) => (
-                  <option key={item}>{item}</option>
+                  <option key={item} value={item}>
+                    {localizeQuality(locale, item)}
+                  </option>
                 ))}
               </select>
               <input
@@ -1056,12 +1204,15 @@ function PlanConfirmDialog({
   )
 }
 
-function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null; assets: Asset[]; onChanged: () => void }) {
+function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null; assets: Asset[]; onChanged: () => void | Promise<void> }) {
   const selectedAssetIds = useAppStore((s) => s.selectedAssetIds)
   const toggleAsset = useAppStore((s) => s.toggleAsset)
+  const deselectAsset = useAppStore((s) => s.deselectAsset)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
+  const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
 
   async function upload(files: FileList | null) {
     if (!sessionId || !files?.length) return
@@ -1071,11 +1222,22 @@ function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null;
       for (const file of Array.from(files)) {
         await api.uploadAsset(sessionId, file, uploadProvider)
       }
-      onChanged()
+      await onChanged()
     } catch (err) {
       setError(err instanceof Error ? err.message : '上传失败')
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function deleteAsset(asset: Asset) {
+    setError('')
+    try {
+      await api.deleteAsset(asset.id)
+      deselectAsset(asset.id)
+      await onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败')
     }
   }
 
@@ -1088,16 +1250,29 @@ function AssetRack({ sessionId, assets, onChanged }: { sessionId: number | null;
           <input type="file" accept="image/png,image/jpeg,image/webp" multiple onChange={(e) => upload(e.target.files)} />
         </label>
       </div>
+      <label className="upload-destination-inline">
+        上传到
+        <select value={uploadProvider} onChange={(event) => setUploadProvider(event.target.value)}>
+          <option value="evolink">Evolink</option>
+          <option value="maxqi">MaxQi</option>
+        </select>
+      </label>
       <div className="asset-grid">
-        {assets.map((asset) => (
-          <button
+        {visibleAssets.map((asset) => (
+          <div
             key={asset.id}
-            className={selectedAssetIds.includes(asset.id) ? 'selected' : ''}
-            onClick={() => toggleAsset(asset.id)}
+            className={`asset-tile ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`}
             title={asset.file_name}
           >
             <img src={asset.url} alt={asset.file_name} />
-          </button>
+            <span className="asset-provider-badge">{providerLabel(asset)}</span>
+            <button className="asset-use" type="button" onClick={() => toggleAsset(asset.id)} title="使用这张参考图">
+              {selectedAssetIds.includes(asset.id) ? '已使用' : '使用'}
+            </button>
+            <button className="asset-delete" type="button" onClick={() => deleteAsset(asset)} title="移除参考图">
+              <X size={14} />
+            </button>
+          </div>
         ))}
       </div>
       {error && <p className="form-error">{error}</p>}
@@ -1119,12 +1294,23 @@ function GenerationSettings() {
   )
 }
 
-function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSessionsChanged: () => void | Promise<void> }) {
+function UserCenter({
+  activeSessionId,
+  onClose,
+  onSessionsChanged,
+}: {
+  activeSessionId: number | null
+  onClose: () => void
+  onSessionsChanged: () => void | Promise<void>
+}) {
   const [data, setData] = useState<UsageResponse | null>(null)
   const [sessions, setSessions] = useState<Session[]>([])
   const [tab, setTab] = useState<'overview' | 'sessions' | 'assets'>('overview')
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
+  const selectAsset = useAppStore((s) => s.selectAsset)
+  const deselectAsset = useAppStore((s) => s.deselectAsset)
+  const locale = useAppStore((s) => s.locale)
 
   async function loadSessions() {
     const res = await api.listAllSessions()
@@ -1145,6 +1331,34 @@ function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSes
     }
   }
 
+  async function loadUsage() {
+    const next = await api.usage()
+    setData(next)
+  }
+
+  async function useLibraryAsset(asset: Asset) {
+    if (!activeSessionId) return
+    setError('')
+    try {
+      const res = await api.useAsset(activeSessionId, asset.id)
+      selectAsset(res.asset.id)
+      await Promise.all([loadUsage(), onSessionsChanged()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '操作失败')
+    }
+  }
+
+  async function deleteLibraryAsset(asset: Asset) {
+    setError('')
+    try {
+      await api.deleteAsset(asset.id)
+      deselectAsset(asset.id)
+      await Promise.all([loadUsage(), onSessionsChanged()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
   async function permanentlyDeleteSession(session: Session) {
     if (!window.confirm(`彻底删除「${session.title}」？这个操作不可恢复。`)) return
     setError('')
@@ -1157,7 +1371,7 @@ function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSes
   }
 
   useEffect(() => {
-    api.usage().then(setData).catch((err) => setError(err.message))
+    loadUsage().catch((err) => setError(err.message))
     loadSessions().catch((err) => setError(err.message))
   }, [])
 
@@ -1180,7 +1394,7 @@ function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSes
           {tab === 'overview' && (
             <>
               <div className="metric-grid">
-                <Metric label="Credits" value={data.summary.credits} />
+                <Metric label="点数" value={data.summary.credits} />
                 <Metric label="生成" value={data.summary.generated_tasks} />
                 <Metric label="已完成" value={data.summary.completed_tasks} />
                 <Metric label="参考图" value={data.summary.reference_images} />
@@ -1190,7 +1404,7 @@ function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSes
                 <div className="ledger-list">
                   {(data.ledger ?? []).map((item) => (
                     <div key={item.id}>
-                      <span>{item.reason}</span>
+                      <span>{localizeReason(locale, item.reason)}</span>
                       <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
                       <small>{new Date(item.created_at).toLocaleString()}</small>
                     </div>
@@ -1207,7 +1421,12 @@ function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSes
                   <div key={session.id} className="session-manager-row">
                     <div>
                       <strong title={session.title}>{session.title}</strong>
-                      <span>{session.archived_at ? `已归档 · ${new Date(session.archived_at).toLocaleString()}` : `活跃 · ${new Date(session.updated_at).toLocaleString()}`}</span>
+                      <span>
+                        {session.archived_at
+                          ? `已归档 · ${new Date(session.archived_at).toLocaleString()}`
+                          : `活跃 · ${new Date(session.updated_at).toLocaleString()}`}
+                        {session.task_status ? ` · ${localizeStatus(locale, session.task_status)}` : ''}
+                      </span>
                     </div>
                     <button className="secondary-button" onClick={() => updateSessionArchive(session)}>
                       {session.archived_at ? <RotateCcw size={16} /> : <Archive size={16} />}
@@ -1227,12 +1446,21 @@ function UserCenter({ onClose, onSessionsChanged }: { onClose: () => void; onSes
             <section className="panel-block">
               <h3>参考图</h3>
               <div className="asset-grid library">
-                {(data.assets ?? []).map((asset) => (
-                  <button key={asset.id} onClick={() => setPreview(asset.url)} title={asset.file_name}>
+                {uniqueAssets(data.assets ?? []).map((asset) => (
+                  <div key={asset.id} className="asset-tile" title={asset.file_name}>
                     <img src={asset.url} alt={asset.file_name} />
-                  </button>
+                    <span className="asset-provider-badge">{providerLabel(asset)}</span>
+                    <button className="asset-use" type="button" onClick={() => useLibraryAsset(asset)} title="使用这张参考图">
+                      使用
+                    </button>
+                    <button className="asset-delete" type="button" onClick={() => deleteLibraryAsset(asset)} title="移除参考图">
+                      <X size={14} />
+                    </button>
+                    <button className="asset-preview-hit" type="button" onClick={() => setPreview(asset.url)} title="预览图片" />
+                  </div>
                 ))}
               </div>
+              {uniqueAssets(data.assets ?? []).length === 0 && <p className="empty-note">还没有参考图</p>}
             </section>
           )}
         </>
@@ -1248,6 +1476,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   const [users, setUsers] = useState<User[]>([])
   const [delta, setDelta] = useState<Record<number, string>>({})
   const [error, setError] = useState('')
+  const locale = useAppStore((s) => s.locale)
 
   async function load() {
     const res = await api.adminUsers()
@@ -1280,7 +1509,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
               <strong>{item.display_name}</strong>
               <span>{item.email}</span>
             </div>
-            <code>{item.role}</code>
+            <code>{translate(locale, `role.${item.role}`, item.role)}</code>
             <b>{item.credits}</b>
             <input value={delta[item.id] ?? ''} onChange={(e) => setDelta((current) => ({ ...current, [item.id]: e.target.value }))} placeholder="+10 / -5" />
             <button className="secondary-button" onClick={() => adjust(item)}>
@@ -1318,10 +1547,31 @@ function Metric({ label, value, valueText }: { label: string; value?: number; va
   )
 }
 
+function uniqueAssets(assets: Asset[]) {
+  const seen = new Set<string>()
+  return assets.filter((asset) => {
+    const provider = asset.provider || 'default'
+    const key = asset.content_hash ? `${provider}:hash:${asset.content_hash}` : asset.url ? `${provider}:url:${asset.url}` : `asset:${asset.id}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function providerLabel(asset: Asset) {
+  if (!asset.provider) return '未知渠道'
+  if (asset.provider === 'evolink') return 'Evolink'
+  if (asset.provider === 'maxqi') return 'MaxQi'
+  return asset.provider
+}
+
 function extractImages(task?: Task): string[] {
   if (!task?.result_json) return []
   try {
     const parsed = JSON.parse(task.result_json)
+    if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { pictu_local_urls?: unknown }).pictu_local_urls)) {
+      return ((parsed as { pictu_local_urls: unknown[] }).pictu_local_urls).filter((item): item is string => typeof item === 'string')
+    }
     const urls = new Set<string>()
     const walk = (value: unknown) => {
       if (typeof value === 'string' && /^(https?:\/\/.+|\/generated\/.+)\.(png|jpg|jpeg|webp)(\?.*)?$/i.test(value)) {

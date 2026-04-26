@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -67,6 +71,8 @@ func (s *Server) routes() *gin.Engine {
 	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
 	protected.DELETE("/sessions/:id", s.deleteSession)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
+	protected.POST("/sessions/:id/assets/:asset_id/use", s.useAsset)
+	protected.DELETE("/assets/:asset_id", s.deleteAsset)
 	protected.POST("/sessions/:id/generate", s.generate)
 	protected.POST("/sessions/:id/generate/stream", s.generateStream)
 	protected.GET("/tasks/:id", s.getTask)
@@ -267,18 +273,74 @@ func (s *Server) uploadAsset(c *gin.Context) {
 		return
 	}
 	defer src.Close()
-	uploaded, err := s.uploadReferenceImage(c, c.PostForm("provider"), file.Filename, file.Header.Get("Content-Type"), file.Size, src)
+	data, err := io.ReadAll(src)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	provider := s.normalizedUploadProvider(c.PostForm("provider"))
+	contentHash := sha256Hex(data)
+	user := currentUser(c)
+	if existing, err := s.store.FindAssetByHash(c, user, sessionID, provider, contentHash); err == nil {
+		c.JSON(http.StatusOK, gin.H{"asset": existing, "deduped": true})
+		return
+	}
+	uploaded, err := s.uploadReferenceImage(c, provider, file.Filename, file.Header.Get("Content-Type"), file.Size, bytes.NewReader(data))
 	if err != nil {
 		fail(c, http.StatusBadGateway, err.Error())
 		return
 	}
-	user := currentUser(c)
-	asset, err := s.store.SaveAsset(c, user, sessionID, uploaded.FileName, uploaded.MIMEType, uploaded.URL, uploaded.SizeBytes)
+	asset, err := s.store.SaveAsset(c, user, sessionID, uploaded.FileName, uploaded.MIMEType, uploaded.URL, uploaded.SizeBytes, provider, contentHash)
 	if err != nil {
 		statusFromErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"asset": asset})
+}
+
+func (s *Server) useAsset(c *gin.Context) {
+	sessionID, ok := pathID(c)
+	if !ok {
+		return
+	}
+	assetID, err := strconv.ParseInt(c.Param("asset_id"), 10, 64)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid asset id")
+		return
+	}
+	user := currentUser(c)
+	source, err := s.store.GetAsset(c, user, assetID)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	if source.SessionID == sessionID {
+		c.JSON(http.StatusOK, gin.H{"asset": source})
+		return
+	}
+	if existing, err := s.store.FindAssetByHash(c, user, sessionID, source.Provider, source.ContentHash); err == nil {
+		c.JSON(http.StatusOK, gin.H{"asset": existing, "deduped": true})
+		return
+	}
+	asset, err := s.store.SaveAsset(c, user, sessionID, source.FileName, source.MIMEType, source.URL, source.SizeBytes, source.Provider, source.ContentHash)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"asset": asset})
+}
+
+func (s *Server) deleteAsset(c *gin.Context) {
+	assetID, err := strconv.ParseInt(c.Param("asset_id"), 10, 64)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid asset id")
+		return
+	}
+	if err := s.store.DeleteAsset(c, currentUser(c), assetID); err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) generate(c *gin.Context) {
@@ -296,6 +358,7 @@ func (s *Server) generate(c *gin.Context) {
 		Confirmed        bool    `json:"confirmed"`
 		Prompt           string  `json:"prompt"`
 		AssistantMessage string  `json:"assistant_message"`
+		UsePlanner       *bool   `json:"use_planner"`
 	}
 	if !bind(c, &req) {
 		return
@@ -327,7 +390,10 @@ func (s *Server) generate(c *gin.Context) {
 		ContextMessages: contextMessages,
 	}
 	var plan GenerationPlan
-	if req.Confirmed && req.Prompt != "" {
+	usePlanner := req.UsePlanner == nil || *req.UsePlanner
+	if !usePlanner {
+		plan = DirectPlan(input)
+	} else if req.Confirmed && req.Prompt != "" {
 		plan = sanitizePlan(GenerationPlan{
 			Prompt:           req.Prompt,
 			Size:             req.Size,
@@ -414,6 +480,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		Resolution string  `json:"resolution"`
 		Quality    string  `json:"quality"`
 		Count      int     `json:"count"`
+		UsePlanner *bool   `json:"use_planner"`
 	}
 	if !bind(c, &req) {
 		return
@@ -458,12 +525,31 @@ func (s *Server) generateStream(c *gin.Context) {
 		return nil
 	}
 
-	plan, err := s.planner.PlanStream(c.Request.Context(), input, func(ev PlanStreamEvent) error {
-		return flush(ev.Type, gin.H{"text": ev.Text})
-	})
-	if err != nil {
-		_ = flush("error", gin.H{"error": err.Error()})
-		return
+	var streamedToolArgs string
+	usePlanner := req.UsePlanner == nil || *req.UsePlanner
+	var plan GenerationPlan
+	if usePlanner {
+		plan, err = s.planner.PlanStream(c.Request.Context(), input, func(ev PlanStreamEvent) error {
+			if ev.Type == "tool" {
+				streamedToolArgs += ev.Text
+				phase := "preparing"
+				if ev.Text == "" {
+					return flush("tool", gin.H{"phase": phase})
+				}
+				prompt := promptFromToolArguments(streamedToolArgs)
+				return flush("tool", gin.H{"phase": phase, "text": ev.Text, "prompt": prompt})
+			}
+			return flush(ev.Type, gin.H{"text": ev.Text})
+		})
+		if err != nil {
+			_ = flush("error", gin.H{"error": err.Error()})
+			return
+		}
+	} else {
+		plan = DirectPlan(input)
+		if plan.AssistantMessage != "" {
+			_ = flush("content", gin.H{"text": plan.AssistantMessage})
+		}
 	}
 	if !plan.ToolCalled {
 		if err := s.store.ReserveCredits(c, user, 1, "llm_reply", ""); err != nil {
@@ -495,6 +581,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		Quality:    plan.Quality,
 		N:          plan.Count,
 	}
+	_ = flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt})
 	task, err := s.evolink.CreateImage(c, evReq)
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
@@ -666,6 +753,68 @@ func settingChanges(input PlanInput, plan GenerationPlan) []gin.H {
 	add("quality", input.Quality, plan.Quality)
 	add("count", input.Count, plan.Count)
 	return changes
+}
+
+func promptFromToolArguments(raw string) string {
+	var args struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal([]byte(raw), &args); err == nil {
+		return strings.TrimSpace(args.Prompt)
+	}
+	key := `"prompt"`
+	start := strings.Index(raw, key)
+	if start < 0 {
+		return ""
+	}
+	afterKey := raw[start+len(key):]
+	colon := strings.Index(afterKey, ":")
+	if colon < 0 {
+		return ""
+	}
+	value := strings.TrimLeft(afterKey[colon+1:], " \t\r\n")
+	if !strings.HasPrefix(value, `"`) {
+		return ""
+	}
+	value = value[1:]
+	var b strings.Builder
+	escaped := false
+	for _, r := range value {
+		if escaped {
+			switch r {
+			case 'n':
+				b.WriteRune('\n')
+			case 't':
+				b.WriteRune('\t')
+			default:
+				b.WriteRune(r)
+			}
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func (s *Server) normalizedUploadProvider(provider string) string {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = s.cfg.Upload.DefaultProvider
+	}
+	return provider
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Server) authMiddleware() gin.HandlerFunc {

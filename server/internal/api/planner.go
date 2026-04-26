@@ -248,6 +248,7 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 
 	var message chatMessage
 	toolByIndex := map[int]*toolCall{}
+	toolStarted := false
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -306,6 +307,12 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 					call = &toolCall{Type: "function"}
 					toolByIndex[deltaCall.Index] = call
 				}
+				if !toolStarted {
+					toolStarted = true
+					if err := emit(PlanStreamEvent{Type: "tool", Text: ""}); err != nil {
+						return message, err
+					}
+				}
 				if deltaCall.ID != "" {
 					call.ID = deltaCall.ID
 				}
@@ -317,6 +324,9 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 				}
 				if deltaCall.Function.Arguments != "" {
 					call.Function.Arguments += deltaCall.Function.Arguments
+					if err := emit(PlanStreamEvent{Type: "tool", Text: deltaCall.Function.Arguments}); err != nil {
+						return message, err
+					}
 				}
 			}
 		}
@@ -363,9 +373,7 @@ func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
 		if args.Count > 0 {
 			plan.Count = args.Count
 		}
-		if args.AssistantMessage != "" {
-			plan.AssistantMessage = args.AssistantMessage
-		}
+		plan.AssistantMessage = mergeAssistantMessage(msg.Content, args.AssistantMessage)
 		break
 	}
 	if !plan.ToolCalled {
@@ -373,6 +381,18 @@ func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
 		return plan
 	}
 	return sanitizePlan(plan, input)
+}
+
+func mergeAssistantMessage(content, toolMessage string) string {
+	content = strings.TrimSpace(content)
+	toolMessage = strings.TrimSpace(toolMessage)
+	if content == "" {
+		return toolMessage
+	}
+	if toolMessage == "" || strings.Contains(content, toolMessage) {
+		return content
+	}
+	return content + "\n\n" + toolMessage
 }
 
 func BuildPlan(input PlanInput) GenerationPlan {
@@ -394,6 +414,19 @@ func BuildPlan(input PlanInput) GenerationPlan {
 		Quality:          input.Quality,
 		Count:            input.Count,
 		AssistantMessage: "我已经整理好生成提示词。",
+		ToolCalled:       true,
+	}
+}
+
+func DirectPlan(input PlanInput) GenerationPlan {
+	input = normalizeInput(input)
+	return GenerationPlan{
+		Prompt:           strings.TrimSpace(input.UserText),
+		Size:             input.Size,
+		Resolution:       input.Resolution,
+		Quality:          input.Quality,
+		Count:            input.Count,
+		AssistantMessage: "已跳过 AI Planner，直接使用你的原始提示词生成。",
 		ToolCalled:       true,
 	}
 }

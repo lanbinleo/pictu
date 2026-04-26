@@ -45,6 +45,9 @@ export const api = {
     if (provider) data.append('provider', provider)
     return request<{ asset: Asset }>(`/api/sessions/${sessionId}/assets`, { method: 'POST', body: data })
   },
+  useAsset: (sessionId: number, assetId: number) =>
+    request<{ asset: Asset }>(`/api/sessions/${sessionId}/assets/${assetId}/use`, { method: 'POST' }),
+  deleteAsset: (assetId: number) => request<{ ok: true }>(`/api/assets/${assetId}`, { method: 'DELETE' }),
   generate: (
     sessionId: number,
     payload: {
@@ -57,6 +60,7 @@ export const api = {
       confirmed?: boolean
       prompt?: string
       assistant_message?: string
+      use_planner?: boolean
     },
   ) =>
     request<GenerateResponse>(`/api/sessions/${sessionId}/generate`, {
@@ -72,6 +76,7 @@ export const api = {
       resolution: string
       quality: string
       count: number
+      use_planner?: boolean
     },
     onEvent: (event: StreamEvent) => void,
   ) => {

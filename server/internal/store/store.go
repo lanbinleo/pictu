@@ -44,14 +44,16 @@ type Session struct {
 }
 
 type Asset struct {
-	ID        int64     `json:"id"`
-	SessionID int64     `json:"session_id"`
-	UserID    int64     `json:"user_id"`
-	FileName  string    `json:"file_name"`
-	MIMEType  string    `json:"mime_type"`
-	URL       string    `json:"url"`
-	SizeBytes int64     `json:"size_bytes"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          int64     `json:"id"`
+	SessionID   int64     `json:"session_id"`
+	UserID      int64     `json:"user_id"`
+	FileName    string    `json:"file_name"`
+	MIMEType    string    `json:"mime_type"`
+	URL         string    `json:"url"`
+	SizeBytes   int64     `json:"size_bytes"`
+	Provider    string    `json:"provider"`
+	ContentHash string    `json:"content_hash"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type Message struct {
@@ -233,6 +235,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if err := s.ensureColumn(ctx, "sessions", "archived_at", "datetime"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "assets", "provider", "text not null default ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "assets", "content_hash", "text not null default ''"); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `update users set role = 'admin'
@@ -460,12 +468,12 @@ func (s *Store) GetSessionDetail(ctx context.Context, user User, id int64) (Sess
 	return SessionDetail{Session: session, Assets: assets, Messages: messages, Tasks: tasks}, nil
 }
 
-func (s *Store) SaveAsset(ctx context.Context, user User, sessionID int64, fileName, mimeType, url string, sizeBytes int64) (Asset, error) {
+func (s *Store) SaveAsset(ctx context.Context, user User, sessionID int64, fileName, mimeType, url string, sizeBytes int64, provider, contentHash string) (Asset, error) {
 	if _, err := s.GetSession(ctx, user, sessionID); err != nil {
 		return Asset{}, err
 	}
-	res, err := s.db.ExecContext(ctx, `insert into assets (tenant_id, session_id, user_id, file_name, mime_type, url, size_bytes) values (?, ?, ?, ?, ?, ?, ?)`,
-		user.TenantID, sessionID, user.ID, fileName, mimeType, url, sizeBytes)
+	res, err := s.db.ExecContext(ctx, `insert into assets (tenant_id, session_id, user_id, file_name, mime_type, url, size_bytes, provider, content_hash) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.TenantID, sessionID, user.ID, fileName, mimeType, url, sizeBytes, provider, contentHash)
 	if err != nil {
 		return Asset{}, err
 	}
@@ -479,8 +487,23 @@ func (s *Store) SaveAsset(ctx context.Context, user User, sessionID int64, fileN
 
 func (s *Store) GetAsset(ctx context.Context, user User, id int64) (Asset, error) {
 	var asset Asset
-	err := s.db.QueryRowContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, created_at from assets where id = ? and tenant_id = ?`, id, user.TenantID).
-		Scan(&asset.ID, &asset.SessionID, &asset.UserID, &asset.FileName, &asset.MIMEType, &asset.URL, &asset.SizeBytes, &asset.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, provider, content_hash, created_at from assets where id = ? and tenant_id = ?`, id, user.TenantID).
+		Scan(&asset.ID, &asset.SessionID, &asset.UserID, &asset.FileName, &asset.MIMEType, &asset.URL, &asset.SizeBytes, &asset.Provider, &asset.ContentHash, &asset.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Asset{}, ErrNotFound
+	}
+	return asset, err
+}
+
+func (s *Store) FindAssetByHash(ctx context.Context, user User, sessionID int64, provider, contentHash string) (Asset, error) {
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(contentHash) == "" {
+		return Asset{}, ErrNotFound
+	}
+	var asset Asset
+	err := s.db.QueryRowContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, provider, content_hash, created_at
+		from assets where session_id = ? and tenant_id = ? and provider = ? and content_hash = ? order by id desc limit 1`,
+		sessionID, user.TenantID, provider, contentHash).
+		Scan(&asset.ID, &asset.SessionID, &asset.UserID, &asset.FileName, &asset.MIMEType, &asset.URL, &asset.SizeBytes, &asset.Provider, &asset.ContentHash, &asset.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -488,7 +511,7 @@ func (s *Store) GetAsset(ctx context.Context, user User, id int64) (Asset, error
 }
 
 func (s *Store) ListAssets(ctx context.Context, user User, sessionID int64) ([]Asset, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, created_at from assets where session_id = ? and tenant_id = ? order by id`, sessionID, user.TenantID)
+	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, provider, content_hash, created_at from assets where session_id = ? and tenant_id = ? order by id`, sessionID, user.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -496,7 +519,7 @@ func (s *Store) ListAssets(ctx context.Context, user User, sessionID int64) ([]A
 	var items []Asset
 	for rows.Next() {
 		var item Asset
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.SizeBytes, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.SizeBytes, &item.Provider, &item.ContentHash, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -508,7 +531,7 @@ func (s *Store) ListUserAssets(ctx context.Context, user User, limit int) ([]Ass
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, created_at from assets where tenant_id = ? order by id desc limit ?`, user.TenantID, limit)
+	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, size_bytes, provider, content_hash, created_at from assets where tenant_id = ? order by id desc limit ?`, user.TenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -516,12 +539,36 @@ func (s *Store) ListUserAssets(ctx context.Context, user User, limit int) ([]Ass
 	var items []Asset
 	for rows.Next() {
 		var item Asset
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.SizeBytes, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.SizeBytes, &item.Provider, &item.ContentHash, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) DeleteAsset(ctx context.Context, user User, id int64) error {
+	var sessionID int64
+	err := s.db.QueryRowContext(ctx, `select session_id from assets where id = ? and tenant_id = ?`, id, user.TenantID).Scan(&sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `delete from assets where id = ? and tenant_id = ?`, id, user.TenantID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	_ = s.touchSession(ctx, sessionID)
+	return nil
 }
 
 func (s *Store) AddMessage(ctx context.Context, user User, sessionID int64, role, content, prompt, taskID string) (Message, error) {
