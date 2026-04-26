@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Archive,
+  BarChart3,
   Camera,
   ChevronDown,
   ChevronUp,
@@ -21,6 +22,7 @@ import {
   Moon,
   PanelLeft,
   Pencil,
+  ScrollText,
   Search,
   Send,
   Settings2,
@@ -31,12 +33,13 @@ import {
   SlidersHorizontal,
   Trash2,
   UserRound,
+  Users,
   Wand2,
   X,
 } from 'lucide-react'
 import { api } from './lib/api'
 import { useAppStore, type Page } from './store/appStore'
-import type { Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageResponse, User } from './types/api'
+import type { AdminStats, Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageBucket, UsageResponse, User } from './types/api'
 import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from './i18n'
 
 type PendingRequest = {
@@ -292,6 +295,7 @@ function Workspace() {
             open={userMenuOpen}
             collapsed={leftCollapsed}
             onToggleOpen={() => setUserMenuOpen((o) => !o)}
+            onClose={() => setUserMenuOpen(false)}
             onOpenSettings={() => { setPage('settings'); setUserMenuOpen(false) }}
             onOpenAdmin={() => { setPage('admin'); setUserMenuOpen(false) }}
             onLogout={clearAuth}
@@ -390,12 +394,22 @@ function UserAvatar({ user, size = 'regular' }: { user: User | null; size?: 'sma
   )
 }
 
-function UserDock({ user, open, collapsed, onToggleOpen, onOpenSettings, onOpenAdmin, onLogout }: {
+function UserDock({ user, open, collapsed, onToggleOpen, onClose, onOpenSettings, onOpenAdmin, onLogout }: {
   user: User | null; open: boolean; collapsed: boolean
-  onToggleOpen: () => void; onOpenSettings: () => void; onOpenAdmin: () => void; onLogout: () => void
+  onToggleOpen: () => void; onClose: () => void; onOpenSettings: () => void; onOpenAdmin: () => void; onLogout: () => void
 }) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [open, onClose])
+
   return (
-    <div className="user-dock">
+    <div className="user-dock" ref={ref}>
       {open && (
         <div className="user-menu">
           <button type="button" onClick={onOpenSettings}><Settings2 size={16} /><span>设置</span></button>
@@ -437,12 +451,6 @@ function MessageStream({ messages, tasks, streamingText, thinkingText, toolDraft
 
   return (
     <div className="message-stream">
-      {visibleMessages.length === 0 && !liveTurn && (
-        <div className="empty-state">
-          <Sparkles size={24} />
-          <h2>今天想画点什么？</h2>
-        </div>
-      )}
       {visibleMessages.map((msg) => {
         const referenceParts = msg.role === 'user' ? splitReferenceMarkdown(msg.content) : { text: msg.content, refs: [] }
         return (
@@ -705,7 +713,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
       <form className={`composer ${composerCentered ? 'centered' : 'docked'}`} onSubmit={submit}>
         {composerCentered && (
           <div className="composer-greeting">
-            <span className="greeting-logo"><Sparkles size={18} /></span>
+            <span className="greeting-logo"><Sparkles size={22} /></span>
             <h2>{greeting}</h2>
           </div>
         )}
@@ -731,7 +739,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
               const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith('image/'))
               if (files.length > 0) { e.preventDefault(); uploadFiles(files) }
             }}
-            placeholder="描述你想要的画面… 支持 --ar 16:9 --q high --n 2"
+            placeholder="描述你想要的画面…"
             rows={1}
           />
           {hasCommandOverrides && (
@@ -1007,6 +1015,22 @@ function Metric({ label, value, valueText }: { label: string; value?: number; va
   return <div className="metric"><span>{label}</span><strong>{valueText ?? value}</strong></div>
 }
 
+function UsageBar({ bucket, maxCredits, granularity }: { bucket: UsageBucket; maxCredits: number; granularity: 'hour' | 'day' }) {
+  const height = Math.max((bucket.credits / maxCredits) * 100, 4)
+  const imagePct = bucket.credits > 0 ? (bucket.image_credits / bucket.credits) * 100 : 0
+  const textPct = bucket.credits > 0 ? (bucket.text_credits / bucket.credits) * 100 : 0
+  const label = granularity === 'hour' ? bucket.period.slice(5, 16) : bucket.period.slice(5)
+  return (
+    <div className="usage-bar-wrap" title={`${bucket.period}: 图片 ${bucket.image_credits}，文本 ${bucket.text_credits}，合计 ${bucket.credits}`}>
+      <div className="usage-bar" style={{ height: `${height}%` }}>
+        {bucket.image_credits > 0 && <span className="usage-bar-image" style={{ height: `${imagePct}%` }} />}
+        {bucket.text_credits > 0 && <span className="usage-bar-text" style={{ height: `${textPct}%` }} />}
+      </div>
+      <span className="chart-label">{label}</span>
+    </div>
+  )
+}
+
 // ── Pages ──
 
 function ChatsPage({ sessions, onSelect, onArchive, onRefresh }: {
@@ -1058,15 +1082,19 @@ function ChatsPage({ sessions, onSelect, onArchive, onRefresh }: {
 
   function timeAgo(dateStr: string) {
     const diff = Date.now() - new Date(dateStr).getTime()
-    const days = Math.floor(diff / 86400000)
-    if (days === 0) return '今天'
+    const minutes = Math.floor(diff / 60000)
+    if (minutes < 1) return '刚刚'
+    if (minutes < 60) return `${minutes} 分钟前`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours} 小时前`
+    const days = Math.floor(hours / 24)
     if (days === 1) return '昨天'
-    if (days < 30) return `${days} 天前`
+    if (days < 3) return `${days} 天前`
     return new Date(dateStr).toLocaleDateString()
   }
 
   return (
-    <div className="page-shell">
+    <div className="page-shell page-shell-fixed page-shell-medium page-shell-centered-header">
       <div className="page-header">
         <h1 className="page-title">对话</h1>
         <p className="page-subtitle">搜索和管理你的所有对话</p>
@@ -1107,12 +1135,18 @@ function GalleryPage({ activeSessionId, onSessionsChanged }: { activeSessionId: 
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [filter, setFilter] = useState<'all' | 'generated' | 'uploaded'>('all')
   const selectAsset = useAppStore((s) => s.selectAsset)
   const deselectAsset = useAppStore((s) => s.deselectAsset)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const galleryAssets = useMemo(() => uniqueAssets(data?.assets ?? []), [data?.assets])
+  const allAssets = useMemo(() => uniqueAssets(data?.assets ?? []), [data?.assets])
+  const galleryAssets = useMemo(() => {
+    if (filter === 'generated') return allAssets.filter(isGeneratedAsset)
+    if (filter === 'uploaded') return allAssets.filter((a) => !isGeneratedAsset(a))
+    return allAssets
+  }, [allAssets, filter])
 
   async function load() {
     const res = await api.usage()
@@ -1167,31 +1201,39 @@ function GalleryPage({ activeSessionId, onSessionsChanged }: { activeSessionId: 
   }
 
   return (
-    <div className="page-shell">
+    <div className="page-shell page-shell-fixed page-shell-wide page-shell-centered-header">
       <div className="page-header">
         <h1 className="page-title">画廊</h1>
         <p className="page-subtitle">你的所有参考图和生成作品</p>
       </div>
       <div className="gallery-page">
         <div className="gallery-toolbar">
-          <label>
-            上传到
-            <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
-              <option value="evolink">Evolink</option>
-              <option value="maxqi">MaxQi</option>
-            </select>
-          </label>
-          <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
-            {uploading ? <Loader2 className="spin" size={16} /> : <ImagePlus size={16} />}
-            上传图片
-          </button>
-          <input ref={fileInputRef} className="hidden-file" type="file" accept="image/*" multiple onChange={(e) => { uploadFiles(e.target.files); e.currentTarget.value = '' }} />
+          <div className="gallery-filters">
+            <button type="button" className={filter === 'all' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('all')}>全部 ({allAssets.length})</button>
+            <button type="button" className={filter === 'generated' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('generated')}>生成</button>
+            <button type="button" className={filter === 'uploaded' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('uploaded')}>上传</button>
+          </div>
+          <div className="gallery-actions">
+            <label>
+              上传到
+              <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
+                <option value="evolink">Evolink</option>
+                <option value="maxqi">MaxQi</option>
+              </select>
+            </label>
+            <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
+              {uploading ? <Loader2 className="spin" size={16} /> : <ImagePlus size={16} />}
+              上传图片
+            </button>
+            <input ref={fileInputRef} className="hidden-file" type="file" accept="image/*" multiple onChange={(e) => { uploadFiles(e.target.files); e.currentTarget.value = '' }} />
+          </div>
         </div>
         {error && <p className="form-error">{error}</p>}
-        <div className="gallery-grid">
+        <div className={`gallery-masonry ${galleryAssets.length === 0 ? 'is-empty' : ''}`}>
+          {galleryAssets.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
           {galleryAssets.map((asset) => (
             <div key={asset.id} className="asset-tile gallery-tile" title={asset.file_name}>
-              <img src={assetImageSrc(asset)} alt={asset.file_name} />
+              <img src={assetImageSrc(asset)} alt={asset.file_name} loading="lazy" />
               <span className="asset-provider-badge">{providerLabel(asset)}</span>
               <button className="asset-use" type="button" onClick={() => useAsset(asset)} title="使用">使用</button>
               <button className="asset-delete" type="button" onClick={() => deleteAsset(asset)} title="删除"><X size={14} /></button>
@@ -1199,7 +1241,6 @@ function GalleryPage({ activeSessionId, onSessionsChanged }: { activeSessionId: 
             </div>
           ))}
         </div>
-        {galleryAssets.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
       </div>
       {preview && <ImageLightbox src={preview} onClose={() => setPreview(null)} />}
     </div>
@@ -1213,20 +1254,23 @@ function SettingsPage() {
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const locale = useAppStore((s) => s.locale)
   const setLocale = useAppStore((s) => s.setLocale)
-  const [tab, setTab] = useState<'profile' | 'billing'>('profile')
+  const [tab, setTab] = useState<'profile' | 'security' | 'billing'>('profile')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [data, setData] = useState<UsageResponse | null>(null)
-  const [profileDraft, setProfileDraft] = useState({ display_name: '', email: '' })
+  const [profileDraft, setProfileDraft] = useState({ display_name: '' })
+  const [emailDraft, setEmailDraft] = useState('')
   const [passwordDraft, setPasswordDraft] = useState({ current: '', next: '', confirm: '' })
   const [profileSaving, setProfileSaving] = useState(false)
+  const [emailSaving, setEmailSaving] = useState(false)
   const [passwordSaving, setPasswordSaving] = useState(false)
   const [avatarUploading, setAvatarUploading] = useState(false)
   const avatarInputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (!user) return
-    setProfileDraft({ display_name: user.display_name || '', email: user.email || '' })
+    setProfileDraft({ display_name: user.display_name || '' })
+    setEmailDraft(user.email || '')
   }, [user?.display_name, user?.email])
 
   useEffect(() => {
@@ -1237,11 +1281,22 @@ function SettingsPage() {
     event.preventDefault()
     setProfileSaving(true); setError(''); setNotice('')
     try {
-      const res = await api.updateMe(profileDraft)
+      const res = await api.updateMe({ display_name: profileDraft.display_name })
       setUser(res.user); setNotice('资料已更新')
     } catch (err) {
       setError(err instanceof Error ? err.message : '保存失败')
     } finally { setProfileSaving(false) }
+  }
+
+  async function saveEmail(event: FormEvent) {
+    event.preventDefault()
+    setEmailSaving(true); setError(''); setNotice('')
+    try {
+      const res = await api.updateMe({ email: emailDraft })
+      setUser(res.user); setNotice('邮箱已更新')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败')
+    } finally { setEmailSaving(false) }
   }
 
   async function savePassword(event: FormEvent) {
@@ -1268,16 +1323,17 @@ function SettingsPage() {
   }
 
   return (
-    <div className="page-shell">
+    <div className="page-shell page-shell-settings page-shell-centered-header">
       <div className="page-header">
         <h1 className="page-title">设置</h1>
         <p className="page-subtitle">管理你的账户和偏好</p>
       </div>
-      {error && <p className="form-error">{error}</p>}
-      {notice && <p className="form-success">{notice}</p>}
+      {error && <p className="form-error settings-alert">{error}</p>}
+      {notice && <p className="form-success settings-alert">{notice}</p>}
       <div className="settings-layout">
         <nav className="settings-nav">
           <button type="button" className={tab === 'profile' ? 'active' : ''} onClick={() => setTab('profile')}><UserRound size={16} /><span>账户</span></button>
+          <button type="button" className={tab === 'security' ? 'active' : ''} onClick={() => setTab('security')}><Lock size={16} /><span>安全</span></button>
           <button type="button" className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}><CreditCard size={16} /><span>账单</span></button>
         </nav>
         <div className="settings-content">
@@ -1295,15 +1351,8 @@ function SettingsPage() {
                 </div>
               </section>
               <form className="profile-form" onSubmit={saveProfile}>
-                <label><span><UserRound size={14} /> 名字</span><input value={profileDraft.display_name} onChange={(e) => setProfileDraft((d) => ({ ...d, display_name: e.target.value }))} /></label>
-                <label><span><Mail size={14} /> 邮箱</span><input type="email" value={profileDraft.email} onChange={(e) => setProfileDraft((d) => ({ ...d, email: e.target.value }))} /></label>
+                <label><span><UserRound size={14} /> 昵称</span><input value={profileDraft.display_name} onChange={(e) => setProfileDraft((d) => ({ ...d, display_name: e.target.value }))} placeholder="展示名称" /></label>
                 <button className="primary-button" disabled={profileSaving}>{profileSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />} 保存</button>
-              </form>
-              <form className="profile-form password-form" onSubmit={savePassword}>
-                <label><span><KeyRound size={14} /> 当前密码</span><input type="password" value={passwordDraft.current} onChange={(e) => setPasswordDraft((d) => ({ ...d, current: e.target.value }))} /></label>
-                <label><span><Lock size={14} /> 新密码</span><input type="password" minLength={8} value={passwordDraft.next} onChange={(e) => setPasswordDraft((d) => ({ ...d, next: e.target.value }))} /></label>
-                <label><span><KeyRound size={14} /> 确认</span><input type="password" minLength={8} value={passwordDraft.confirm} onChange={(e) => setPasswordDraft((d) => ({ ...d, confirm: e.target.value }))} /></label>
-                <button className="secondary-button" disabled={passwordSaving}>{passwordSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />} 修改密码</button>
               </form>
               <div className="panel-block">
                 <h3>偏好</h3>
@@ -1315,6 +1364,26 @@ function SettingsPage() {
                   <span>语言</span>
                   <button type="button" className="icon-button" onClick={() => setLocale(locale === 'zh-CN' ? 'en-US' : 'zh-CN')}><Languages size={16} /></button>
                 </label>
+              </div>
+            </>
+          )}
+          {tab === 'security' && (
+            <>
+              <div className="panel-block">
+                <h3>邮箱</h3>
+                <form className="security-inline-form" onSubmit={saveEmail}>
+                  <label><span><Mail size={14} /> 登录邮箱</span><input type="email" value={emailDraft} onChange={(e) => setEmailDraft(e.target.value)} /></label>
+                  <button className="secondary-button" disabled={emailSaving}>{emailSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />} 更新邮箱</button>
+                </form>
+              </div>
+              <div className="panel-block">
+                <h3>修改密码</h3>
+                <form className="security-inline-form" onSubmit={savePassword}>
+                  <label><span><KeyRound size={14} /> 当前密码</span><input type="password" value={passwordDraft.current} onChange={(e) => setPasswordDraft((d) => ({ ...d, current: e.target.value }))} /></label>
+                  <label><span><Lock size={14} /> 新密码</span><input type="password" minLength={8} value={passwordDraft.next} onChange={(e) => setPasswordDraft((d) => ({ ...d, next: e.target.value }))} /></label>
+                  <label><span><KeyRound size={14} /> 确认新密码</span><input type="password" minLength={8} value={passwordDraft.confirm} onChange={(e) => setPasswordDraft((d) => ({ ...d, confirm: e.target.value }))} /></label>
+                  <button className="secondary-button" disabled={passwordSaving}>{passwordSaving ? <Loader2 className="spin" size={16} /> : <Check size={16} />} 修改密码</button>
+                </form>
               </div>
             </>
           )}
@@ -1348,49 +1417,127 @@ function SettingsPage() {
 }
 
 function AdminPage() {
+  const [tab, setTab] = useState<'overview' | 'users' | 'ledger'>('overview')
+  const [statsGranularity, setStatsGranularity] = useState<'hour' | 'day'>('hour')
   const [users, setUsers] = useState<User[]>([])
   const [delta, setDelta] = useState<Record<number, string>>({})
   const [error, setError] = useState('')
+  const [stats, setStats] = useState<AdminStats | null>(null)
+  const [ledger, setLedger] = useState<{ id: number; user_id: number; user_email: string; delta: number; balance: number; reason: string; ref_id: string; created_at: string }[]>([])
   const locale = useAppStore((s) => s.locale)
 
-  async function load() {
+  async function loadUsers() {
     const res = await api.adminUsers()
     setUsers(res.users ?? [])
+  }
+
+  async function loadStats(granularity = statsGranularity) {
+    const res = await api.adminStats(granularity, granularity === 'hour' ? 24 : 30)
+    setStats(res)
+  }
+
+  async function loadLedger() {
+    const res = await api.adminLedger(200)
+    setLedger(res.entries ?? [])
   }
 
   async function adjust(user: User) {
     const value = Number(delta[user.id])
     if (!Number.isFinite(value) || value === 0) return
+    setError('')
     try {
       const res = await api.adminAdjustCredits(user.id, { delta: value, reason: 'admin_adjustment' })
       setUsers((items) => items.map((i) => (i.id === user.id ? res.user : i)))
       setDelta((c) => ({ ...c, [user.id]: '' }))
+      await Promise.all([loadStats(), loadLedger()])
     } catch (err) {
       setError(err instanceof Error ? err.message : '调整失败')
     }
   }
 
-  useEffect(() => { load().catch((e) => setError(e.message)) }, [])
+  useEffect(() => {
+    loadUsers().catch((e) => setError(e.message))
+    loadLedger().catch((e) => setError(e.message))
+  }, [])
+
+  useEffect(() => {
+    loadStats(statsGranularity).catch((e) => setError(e.message))
+  }, [statsGranularity])
+
+  const usageBuckets = stats?.usage_buckets ?? []
+  const maxCredits = Math.max(...usageBuckets.map((d) => d.credits), 1)
 
   return (
-    <div className="page-shell">
+    <div className="page-shell page-shell-wide">
       <div className="page-header">
         <h1 className="page-title">管理</h1>
-        <p className="page-subtitle">用户管理和点数调整</p>
+        <p className="page-subtitle">系统概览、用户管理和日志</p>
       </div>
       <div className="admin-page">
+        <nav className="admin-tabs">
+          <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}><BarChart3 size={16} /><span>概览</span></button>
+          <button type="button" className={tab === 'users' ? 'active' : ''} onClick={() => setTab('users')}><Users size={16} /><span>用户</span></button>
+          <button type="button" className={tab === 'ledger' ? 'active' : ''} onClick={() => setTab('ledger')}><ScrollText size={16} /><span>日志</span></button>
+        </nav>
         {error && <p className="form-error">{error}</p>}
-        <div className="admin-list">
-          {users.map((item) => (
-            <div className="admin-row" key={item.id}>
-              <div><strong>{item.display_name}</strong><span>{item.email}</span></div>
-              <code>{translate(locale, `role.${item.role}`, item.role)}</code>
-              <b>{item.credits}</b>
-              <input value={delta[item.id] ?? ''} onChange={(e) => setDelta((c) => ({ ...c, [item.id]: e.target.value }))} placeholder="+10 / -5" />
-              <button className="secondary-button" onClick={() => adjust(item)}>调整</button>
+
+        {tab === 'overview' && stats && (
+          <>
+            <div className="metric-grid">
+              <Metric label="用户" value={stats.total_users} />
+              <Metric label="会话" value={stats.total_sessions} />
+              <Metric label="任务" value={stats.total_tasks} />
+              <Metric label="消耗点数" value={stats.total_credits_spent} />
             </div>
-          ))}
-        </div>
+            <section className="panel-block">
+              <div className="panel-head">
+                <h3>{statsGranularity === 'hour' ? '近 24 小时消耗' : '近 30 天消耗'}</h3>
+                <div className="segmented-control" role="group" aria-label="统计维度">
+                  <button type="button" className={statsGranularity === 'hour' ? 'active' : ''} onClick={() => setStatsGranularity('hour')}>小时</button>
+                  <button type="button" className={statsGranularity === 'day' ? 'active' : ''} onClick={() => setStatsGranularity('day')}>天</button>
+                </div>
+              </div>
+              <div className="chart-legend">
+                <span><i className="legend-image" />图片生成</span>
+                <span><i className="legend-text" />文本模型</span>
+              </div>
+              <div className="usage-chart">
+                {usageBuckets.map((d) => (
+                  <UsageBar key={d.period} bucket={d} maxCredits={maxCredits} granularity={statsGranularity} />
+                ))}
+                {usageBuckets.length === 0 && <p className="empty-note">暂无数据</p>}
+              </div>
+            </section>
+          </>
+        )}
+
+        {tab === 'users' && (
+          <div className="admin-list">
+            {users.map((item) => (
+              <div className="admin-row" key={item.id}>
+                <div><strong>{item.display_name}</strong><span>{item.email}</span></div>
+                <code>{translate(locale, `role.${item.role}`, item.role)}</code>
+                <b>{item.credits}</b>
+                <input value={delta[item.id] ?? ''} onChange={(e) => setDelta((c) => ({ ...c, [item.id]: e.target.value }))} placeholder="+10 / -5" />
+                <button className="secondary-button" onClick={() => adjust(item)}>调整</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'ledger' && (
+          <div className="ledger-list admin-ledger">
+            {ledger.map((item) => (
+              <div key={item.id}>
+                <span className="ledger-email">{item.user_email}</span>
+                <span>{localizeReason(locale, item.reason)}</span>
+                <strong className={item.delta > 0 ? 'positive' : 'negative'}>{item.delta > 0 ? `+${item.delta}` : item.delta}</strong>
+                <small>{new Date(item.created_at).toLocaleString()}</small>
+              </div>
+            ))}
+            {ledger.length === 0 && <p className="empty-note">暂无日志</p>}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1427,20 +1574,32 @@ function initialsFor(name: string) {
 function buildComposerGreeting(user: User | null) {
   const name = userDisplayName(user)
   const hour = new Date().getHours()
-  const dayKey = new Date().toISOString().slice(0, 10)
-  const seed = hashString(`${dayKey}:${name}:${Math.floor(hour / 6)}`)
+  const rand = Math.random()
+
   const playful = [
     `${name}，今天让画面先呼吸一下`,
     `给 ${name} 留一盏灵感的小灯`,
     `${name}，来一张会被记住的图`,
     `今天的第一笔，交给 ${name}`,
+    `${name}，脑海里的画面该落地了`,
+    `${name}，想好画什么了吗？`,
+    `${name}，把想象变成像素吧`,
+    `${name}，今天想创造点什么？`,
+    `落笔之前，先深呼吸，${name}`,
+    `${name}，灵感来了别让它跑了`,
   ]
-  if (seed % 100 < 9) return playful[seed % playful.length]
-  if (hour < 5) return `Night, ${name}`
-  if (hour < 12) return `Morning, ${name}`
-  if (hour < 18) return `Afternoon, ${name}`
-  if (hour < 22) return `Evening, ${name}`
-  return `Night, ${name}`
+
+  if (rand < 0.15) return playful[Math.floor(Math.random() * playful.length)]
+
+  const showExtra = new Date().getMinutes() % 2 === 1
+
+  if (hour < 5) return `夜深了，${name}` + (showExtra ? `，适合画安静的东西` : ``)
+  if (hour < 9) return `早安，${name}` + (showExtra ? `，新的一天从一张图开始` : ``)
+  if (hour < 12) return `上午好，${name}` + (showExtra ? `，光线正好，适合创作` : ``)
+  if (hour < 14) return `中午好，${name}` + (showExtra ? `，午后来点灵感？` : ``)
+  if (hour < 18) return `下午好，${name}` + (showExtra ? `，继续画吧` : ``)
+  if (hour < 22) return `晚上好，${name}` + (showExtra ? `，夜晚总能出好图` : ``)
+  return `夜深了，${name}` + (showExtra ? `，熬夜创作要记得休息` : ``)
 }
 
 function hashString(value: string) {
@@ -1461,6 +1620,11 @@ function uniqueAssets(assets: Asset[]) {
 }
 
 function assetImageSrc(asset: Asset) { return asset.local_url || asset.url }
+
+function isGeneratedAsset(asset: Asset) {
+  const provider = (asset.provider || '').toLowerCase()
+  return provider === 'generated' || provider === 'generation' || provider === 'task'
+}
 
 function providerLabel(asset: Asset) {
   if (!asset.provider) return '未知渠道'

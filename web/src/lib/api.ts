@@ -1,5 +1,5 @@
 import { useAppStore } from '../store/appStore'
-import type { Asset, GenerateResponse, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
+import type { AdminLedgerEntry, AdminStats, Asset, GenerateResponse, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
 
 type AuthResponse = {
   token: string
@@ -29,7 +29,7 @@ export const api = {
   login: (payload: { email: string; password: string }) =>
     request<AuthResponse>('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request<{ user: User }>('/api/me'),
-  updateMe: (payload: { email: string; display_name: string }) =>
+  updateMe: (payload: { email?: string; display_name?: string }) =>
     request<{ user: User }>('/api/me', { method: 'PUT', body: JSON.stringify(payload) }),
   updatePassword: (payload: { current_password: string; new_password: string }) =>
     request<{ ok: true }>('/api/me/password', { method: 'PUT', body: JSON.stringify(payload) }),
@@ -127,6 +127,9 @@ export const api = {
   adminUsers: () => request<{ users: User[] | null }>('/api/admin/users'),
   adminAdjustCredits: (id: number, payload: { delta: number; reason?: string }) =>
     request<{ user: User }>(`/api/admin/users/${id}/credits`, { method: 'POST', body: JSON.stringify(payload) }),
+  adminStats: (granularity: 'hour' | 'day' = 'hour', window = granularity === 'hour' ? 24 : 30) =>
+    request<AdminStats>(`/api/admin/stats?granularity=${granularity}&days=${window}`),
+  adminLedger: (limit = 200) => request<{ entries: AdminLedgerEntry[] | null }>(`/api/admin/ledger?limit=${limit}`),
 }
 
 function parseSSE(chunk: string): StreamEvent | null {

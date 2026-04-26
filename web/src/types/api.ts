@@ -123,3 +123,37 @@ export type StreamEvent =
   | ({ type: 'confirm' } & GenerateResponse)
   | ({ type: 'done' } & GenerateResponse)
   | { type: 'error'; error: string }
+
+export type DailyBucket = {
+  date: string
+  tasks: number
+  credits: number
+}
+
+export type UsageBucket = {
+  period: string
+  tasks: number
+  credits: number
+  text_credits: number
+  image_credits: number
+}
+
+export type AdminStats = {
+  total_users: number
+  total_sessions: number
+  total_tasks: number
+  total_credits_spent: number
+  daily_usage: DailyBucket[] | null
+  usage_buckets: UsageBucket[] | null
+}
+
+export type AdminLedgerEntry = {
+  id: number
+  user_id: number
+  user_email: string
+  delta: number
+  balance: number
+  reason: string
+  ref_id: string
+  created_at: string
+}
