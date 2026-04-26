@@ -1,16 +1,19 @@
-# Local config and data
+.git
+.github
+
+# Local config and runtime data
 config.toml
 config.docker.toml
 *.db
 *.db-*
 generated/
 
-# Frontend
+# Frontend artifacts
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
 
-# Backend build artifacts
+# Backend artifacts
 server/pictu
 server/pictu.exe
 

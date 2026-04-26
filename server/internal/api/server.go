@@ -56,6 +56,7 @@ func (s *Server) routes() *gin.Engine {
 	}))
 
 	api := r.Group("/api")
+	api.GET("/healthz", s.healthz)
 	api.POST("/auth/register", s.register)
 	api.POST("/auth/login", s.login)
 
@@ -85,6 +86,10 @@ func (s *Server) routes() *gin.Engine {
 
 	s.serveFrontend(r)
 	return r
+}
+
+func (s *Server) healthz(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) register(c *gin.Context) {

@@ -1,0 +1,17 @@
+services:
+  pictu:
+    image: ghcr.io/lanbinleo/pictu:latest
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "${PICTU_PORT:-8080}:8080"
+    environment:
+      PICTU_CONFIG: /data/config.toml
+      GIN_MODE: release
+    volumes:
+      - pictu-data:/data
+      - ./config.docker.toml:/data/config.toml:ro
+
+volumes:
+  pictu-data:
