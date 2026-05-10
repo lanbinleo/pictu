@@ -11,6 +11,7 @@ const dictionaries = {
     reason: {
       signup: '注册赠送',
       image_generation: '图片生成',
+      llm_planner: 'Planner',
       llm_reply: '对话回复',
       generation_refund: '生成退款',
       admin_adjustment: '管理员调整',
@@ -40,6 +41,7 @@ const dictionaries = {
     reason: {
       signup: 'Signup credits',
       image_generation: 'Image generation',
+      llm_planner: 'Planner',
       llm_reply: 'Chat reply',
       generation_refund: 'Generation refund',
       admin_adjustment: 'Admin adjustment',

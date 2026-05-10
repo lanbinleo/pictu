@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"pictu/server/internal/config"
+	"pictu/server/internal/evolink"
 )
 
 type uploadedImage struct {
@@ -24,16 +25,30 @@ type uploadedImage struct {
 }
 
 func (s *Server) uploadReferenceImage(ctx context.Context, providerName, fileName, mimeType string, size int64, src io.Reader) (uploadedImage, error) {
-	if providerName == "" {
-		providerName = s.cfg.Upload.DefaultProvider
+	settings, err := s.runtimeSettings(ctx)
+	if err != nil {
+		return uploadedImage{}, err
 	}
-	provider, ok := s.cfg.Upload.Providers[providerName]
+	if providerName == "" {
+		providerName = settings.Defaults.UploadProvider
+	}
+	runtimeProvider, ok := settings.uploadProvider(providerName)
 	if !ok {
 		return uploadedImage{}, fmt.Errorf("unknown upload provider: %s", providerName)
 	}
+	provider := config.Provider{
+		Type:       runtimeProvider.Type,
+		BaseURL:    runtimeProvider.BaseURL,
+		Token:      runtimeProvider.Token,
+		StrategyID: runtimeProvider.StrategyID,
+	}
 	switch provider.Type {
 	case "", "evolink":
-		data, err := s.evolink.UploadStream(ctx, fileName, mimeType, src)
+		client := s.evolink
+		if imageProvider, ok := settings.imageProvider(settings.Defaults.ImageProvider); ok {
+			client = evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, imageProvider))
+		}
+		data, err := client.UploadStream(ctx, fileName, mimeType, src)
 		if err != nil {
 			return uploadedImage{}, err
 		}

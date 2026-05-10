@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
@@ -35,6 +36,7 @@ type User struct {
 
 type Session struct {
 	ID         int64      `json:"id"`
+	PublicID   string     `json:"public_id"`
 	TenantID   int64      `json:"tenant_id"`
 	UserID     int64      `json:"user_id"`
 	Title      string     `json:"title"`
@@ -71,6 +73,7 @@ type Message struct {
 type Task struct {
 	ID             int64     `json:"id"`
 	SessionID      int64     `json:"session_id"`
+	Provider       string    `json:"provider"`
 	ProviderTaskID string    `json:"provider_task_id"`
 	Status         string    `json:"status"`
 	Progress       int       `json:"progress"`
@@ -176,6 +179,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`create table if not exists sessions (
 			id integer primary key autoincrement,
+			public_id text not null unique,
 			tenant_id integer not null references tenants(id) on delete cascade,
 			user_id integer not null references users(id) on delete cascade,
 			title text not null,
@@ -209,6 +213,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			tenant_id integer not null references tenants(id) on delete cascade,
 			session_id integer not null references sessions(id) on delete cascade,
 			user_id integer not null references users(id) on delete cascade,
+			provider text not null default '',
 			provider_task_id text not null unique,
 			status text not null,
 			progress integer not null default 0,
@@ -230,6 +235,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			ref_id text not null default '',
 			created_at datetime not null default current_timestamp
 		)`,
+		`create table if not exists system_settings (
+			key text primary key,
+			value text not null,
+			updated_at datetime not null default current_timestamp
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -237,6 +247,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	if err := s.ensureColumn(ctx, "sessions", "archived_at", "datetime"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sessions", "public_id", "text not null default ''"); err != nil {
+		return err
+	}
+	if err := s.backfillSessionPublicIDs(ctx); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `create unique index if not exists idx_sessions_public_id on sessions(public_id)`); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "assets", "provider", "text not null default ''"); err != nil {
@@ -251,12 +270,66 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "users", "avatar_url", "text not null default ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "tasks", "provider", "text not null default ''"); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `update users set role = 'admin'
 		where id = (select min(id) from users)
 		and not exists (select 1 from users where role = 'admin')`); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) backfillSessionPublicIDs(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `select id from sessions where public_id = ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.db.ExecContext(ctx, `update sessions set public_id = ? where id = ?`, uuid.NewString(), id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `select value from system_settings where key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return value, err
+}
+
+func (s *Store) SaveSystemSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `insert into system_settings (key, value, updated_at) values (?, ?, current_timestamp)
+		on conflict(key) do update set value = excluded.value, updated_at = current_timestamp`, key, value)
+	return err
+}
+
+func (s *Store) EnsureSystemSetting(ctx context.Context, key, value string) error {
+	var existing int
+	if err := s.db.QueryRowContext(ctx, `select count(*) from system_settings where key = ?`, key).Scan(&existing); err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil
+	}
+	return s.SaveSystemSetting(ctx, key, value)
 }
 
 func (s *Store) CreateUserWithTenant(ctx context.Context, email, passwordHash, displayName string, signupCredits int) (User, error) {
@@ -386,7 +459,7 @@ func (s *Store) CreateSession(ctx context.Context, user User, title string) (Ses
 	if err := s.DeleteEmptySessions(ctx, user); err != nil {
 		return Session{}, err
 	}
-	res, err := s.db.ExecContext(ctx, `insert into sessions (tenant_id, user_id, title) values (?, ?, ?)`, user.TenantID, user.ID, title)
+	res, err := s.db.ExecContext(ctx, `insert into sessions (public_id, tenant_id, user_id, title) values (?, ?, ?, ?)`, uuid.NewString(), user.TenantID, user.ID, title)
 	if err != nil {
 		return Session{}, err
 	}
@@ -400,8 +473,8 @@ func (s *Store) CreateSession(ctx context.Context, user User, title string) (Ses
 func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, error) {
 	var session Session
 	var archivedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, `select id, tenant_id, user_id, title, '', created_at, updated_at, archived_at from sessions where id = ? and tenant_id = ? and archived_at is null`, id, user.TenantID).
-		Scan(&session.ID, &session.TenantID, &session.UserID, &session.Title, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt, &archivedAt)
+	err := s.db.QueryRowContext(ctx, `select id, public_id, tenant_id, user_id, title, '', created_at, updated_at, archived_at from sessions where id = ? and tenant_id = ? and archived_at is null`, id, user.TenantID).
+		Scan(&session.ID, &session.PublicID, &session.TenantID, &session.UserID, &session.Title, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt, &archivedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -412,7 +485,7 @@ func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, e
 }
 
 func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `select s.id, s.tenant_id, s.user_id, s.title,
+	rows, err := s.db.QueryContext(ctx, `select s.id, s.public_id, s.tenant_id, s.user_id, s.title,
 		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
 		s.created_at, s.updated_at, s.archived_at from sessions s where s.tenant_id = ? and s.archived_at is null order by s.updated_at desc`, user.TenantID)
 	if err != nil {
@@ -423,7 +496,7 @@ func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) 
 }
 
 func (s *Store) ListAllSessions(ctx context.Context, user User) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `select s.id, s.tenant_id, s.user_id, s.title,
+	rows, err := s.db.QueryContext(ctx, `select s.id, s.public_id, s.tenant_id, s.user_id, s.title,
 		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
 		s.created_at, s.updated_at, s.archived_at from sessions s where s.tenant_id = ? order by coalesce(s.archived_at, s.updated_at) desc`, user.TenantID)
 	if err != nil {
@@ -721,9 +794,9 @@ func (s *Store) ListMessages(ctx context.Context, user User, sessionID int64) ([
 	return items, rows.Err()
 }
 
-func (s *Store) CreateTask(ctx context.Context, user User, sessionID int64, providerTaskID, status string, progress, cost int, prompt, requestJSON string) (Task, error) {
-	res, err := s.db.ExecContext(ctx, `insert into tasks (tenant_id, session_id, user_id, provider_task_id, status, progress, cost, prompt, request_json) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		user.TenantID, sessionID, user.ID, providerTaskID, status, progress, cost, prompt, requestJSON)
+func (s *Store) CreateTask(ctx context.Context, user User, sessionID int64, provider, providerTaskID, status string, progress, cost int, prompt, requestJSON string) (Task, error) {
+	res, err := s.db.ExecContext(ctx, `insert into tasks (tenant_id, session_id, user_id, provider, provider_task_id, status, progress, cost, prompt, request_json) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.TenantID, sessionID, user.ID, provider, providerTaskID, status, progress, cost, prompt, requestJSON)
 	if err != nil {
 		return Task{}, err
 	}
@@ -737,8 +810,8 @@ func (s *Store) CreateTask(ctx context.Context, user User, sessionID int64, prov
 
 func (s *Store) GetTaskByLocalID(ctx context.Context, user User, id int64) (Task, error) {
 	var task Task
-	err := s.db.QueryRowContext(ctx, `select id, session_id, provider_task_id, status, progress, cost, prompt, result_json, error, created_at, updated_at from tasks where id = ? and tenant_id = ?`, id, user.TenantID).
-		Scan(&task.ID, &task.SessionID, &task.ProviderTaskID, &task.Status, &task.Progress, &task.Cost, &task.Prompt, &task.ResultJSON, &task.Error, &task.CreatedAt, &task.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `select id, session_id, provider, provider_task_id, status, progress, cost, prompt, result_json, error, created_at, updated_at from tasks where id = ? and tenant_id = ?`, id, user.TenantID).
+		Scan(&task.ID, &task.SessionID, &task.Provider, &task.ProviderTaskID, &task.Status, &task.Progress, &task.Cost, &task.Prompt, &task.ResultJSON, &task.Error, &task.CreatedAt, &task.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -748,11 +821,11 @@ func (s *Store) GetTaskByLocalID(ctx context.Context, user User, id int64) (Task
 func (s *Store) GetTaskByProviderID(ctx context.Context, providerTaskID string) (Task, User, error) {
 	var task Task
 	var user User
-	err := s.db.QueryRowContext(ctx, `select t.id, t.session_id, t.provider_task_id, t.status, t.progress, t.cost, t.prompt, t.result_json, t.error, t.created_at, t.updated_at,
-		u.id, u.tenant_id, u.email, u.password_hash, u.display_name, u.role, u.credits, u.created_at
+	err := s.db.QueryRowContext(ctx, `select t.id, t.session_id, t.provider, t.provider_task_id, t.status, t.progress, t.cost, t.prompt, t.result_json, t.error, t.created_at, t.updated_at,
+		u.id, u.tenant_id, u.email, u.password_hash, u.display_name, u.avatar_url, u.role, u.credits, u.created_at
 		from tasks t join users u on u.id = t.user_id where t.provider_task_id = ?`, providerTaskID).
-		Scan(&task.ID, &task.SessionID, &task.ProviderTaskID, &task.Status, &task.Progress, &task.Cost, &task.Prompt, &task.ResultJSON, &task.Error, &task.CreatedAt, &task.UpdatedAt,
-			&user.ID, &user.TenantID, &user.Email, &user.Password, &user.DisplayName, &user.Role, &user.Credits, &user.CreatedAt)
+		Scan(&task.ID, &task.SessionID, &task.Provider, &task.ProviderTaskID, &task.Status, &task.Progress, &task.Cost, &task.Prompt, &task.ResultJSON, &task.Error, &task.CreatedAt, &task.UpdatedAt,
+			&user.ID, &user.TenantID, &user.Email, &user.Password, &user.DisplayName, &user.AvatarURL, &user.Role, &user.Credits, &user.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, User{}, ErrNotFound
 	}
@@ -760,7 +833,7 @@ func (s *Store) GetTaskByProviderID(ctx context.Context, providerTaskID string) 
 }
 
 func (s *Store) ListTasks(ctx context.Context, user User, sessionID int64) ([]Task, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, session_id, provider_task_id, status, progress, cost, prompt, result_json, error, created_at, updated_at from tasks where session_id = ? and tenant_id = ? order by id desc`, sessionID, user.TenantID)
+	rows, err := s.db.QueryContext(ctx, `select id, session_id, provider, provider_task_id, status, progress, cost, prompt, result_json, error, created_at, updated_at from tasks where session_id = ? and tenant_id = ? order by id desc`, sessionID, user.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -768,7 +841,7 @@ func (s *Store) ListTasks(ctx context.Context, user User, sessionID int64) ([]Ta
 	var items []Task
 	for rows.Next() {
 		var item Task
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.ProviderTaskID, &item.Status, &item.Progress, &item.Cost, &item.Prompt, &item.ResultJSON, &item.Error, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Provider, &item.ProviderTaskID, &item.Status, &item.Progress, &item.Cost, &item.Prompt, &item.ResultJSON, &item.Error, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -845,8 +918,14 @@ func (s *Store) ListLedger(ctx context.Context, user User, limit int) ([]CreditL
 
 func (s *Store) UsageSummary(ctx context.Context, user User) (UsageSummary, error) {
 	summary := UsageSummary{Credits: user.Credits}
-	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'completed' then 1 else 0 end), 0), coalesce(sum(case when status = 'failed' then 1 else 0 end), 0), coalesce(sum(cost), 0) from tasks where tenant_id = ? and user_id = ?`, user.TenantID, user.ID).
-		Scan(&summary.GeneratedTasks, &summary.CompletedTasks, &summary.FailedTasks, &summary.CreditsSpent)
+	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'completed' then 1 else 0 end), 0), coalesce(sum(case when status = 'failed' then 1 else 0 end), 0) from tasks where tenant_id = ? and user_id = ?`, user.TenantID, user.ID).
+		Scan(&summary.GeneratedTasks, &summary.CompletedTasks, &summary.FailedTasks)
+	if err != nil {
+		return UsageSummary{}, err
+	}
+	err = s.db.QueryRowContext(ctx, `select coalesce(sum(-delta), 0) from credit_ledger
+		where tenant_id = ? and user_id = ? and delta < 0 and reason in ('image_generation', 'llm_planner', 'llm_reply')`, user.TenantID, user.ID).
+		Scan(&summary.CreditsSpent)
 	if err != nil {
 		return UsageSummary{}, err
 	}
@@ -907,7 +986,7 @@ func (s *Store) AdminStats(ctx context.Context, granularity string, window int) 
 	if err := s.db.QueryRowContext(ctx, `select count(*) from tasks`).Scan(&stats.TotalTasks); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `select coalesce(sum(-delta),0) from credit_ledger where delta < 0 and reason in ('image_generation', 'llm_reply')`).Scan(&stats.TotalCredits); err != nil {
+	if err := s.db.QueryRowContext(ctx, `select coalesce(sum(-delta),0) from credit_ledger where delta < 0 and reason in ('image_generation', 'llm_planner', 'llm_reply')`).Scan(&stats.TotalCredits); err != nil {
 		return stats, err
 	}
 
@@ -922,11 +1001,11 @@ func (s *Store) AdminStats(ctx context.Context, granularity string, window int) 
 		select %s as bucket,
 			sum(case when reason = 'image_generation' then 1 else 0 end) as tasks,
 			coalesce(sum(-delta), 0) as credits,
-			coalesce(sum(case when reason = 'llm_reply' then -delta else 0 end), 0) as text_credits,
+			coalesce(sum(case when reason in ('llm_planner', 'llm_reply') then -delta else 0 end), 0) as text_credits,
 			coalesce(sum(case when reason = 'image_generation' then -delta else 0 end), 0) as image_credits
 		from credit_ledger
 		where delta < 0
-			and reason in ('image_generation', 'llm_reply')
+			and reason in ('image_generation', 'llm_planner', 'llm_reply')
 			and created_at >= datetime('now', ?)
 		group by bucket
 		order by bucket asc`, bucketExpr), modifier)
@@ -1062,7 +1141,7 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 	for rows.Next() {
 		var item Session
 		var archivedAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.TenantID, &item.UserID, &item.Title, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt, &archivedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.PublicID, &item.TenantID, &item.UserID, &item.Title, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt, &archivedAt); err != nil {
 			return nil, err
 		}
 		if archivedAt.Valid {

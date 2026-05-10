@@ -11,6 +11,7 @@ export type User = {
 
 export type Session = {
   id: number
+  public_id: string
   tenant_id: number
   user_id: number
   title: string
@@ -47,6 +48,7 @@ export type Message = {
 export type Task = {
   id: number
   session_id: number
+  provider: string
   provider_task_id: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
   progress: number
@@ -128,6 +130,70 @@ export type DailyBucket = {
   date: string
   tasks: number
   credits: number
+}
+
+export type RuntimeBilling = {
+  signup_credits: number
+  llm_base_cost: number
+  image_base_cost: number
+  image_input_cost: number
+  high_quality_multiplier: number
+  low_quality_multiplier: number
+}
+
+export type RuntimeDefaults = {
+  planner_provider: string
+  planner_model: string
+  title_provider: string
+  title_model: string
+  upload_provider: string
+  image_provider: string
+}
+
+export type RuntimeLLMProvider = {
+  id: string
+  name: string
+  type: string
+  base_url: string
+  api_key: string
+  planner_model: string
+  title_model: string
+  timeout_seconds: number
+  max_context_messages: number
+  credit_multiplier: number
+  allow_user_select: boolean
+  enabled: boolean
+}
+
+export type RuntimeUploadProvider = {
+  id: string
+  name: string
+  type: string
+  base_url: string
+  token: string
+  strategy_id: number
+  enabled: boolean
+}
+
+export type RuntimeImageProvider = {
+  id: string
+  name: string
+  type: string
+  base_url: string
+  files_base_url: string
+  api_key: string
+  model: string
+  credit_multiplier: number
+  allow_user_select: boolean
+  enabled: boolean
+}
+
+export type RuntimeSettings = {
+  billing: RuntimeBilling
+  defaults: RuntimeDefaults
+  llm_providers: RuntimeLLMProvider[]
+  upload_providers: RuntimeUploadProvider[]
+  image_providers: RuntimeImageProvider[]
 }
 
 export type UsageBucket = {

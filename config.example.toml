@@ -11,40 +11,9 @@ path = "pictu.db"
 generated_dir = "generated"
 public_prefix = "/generated"
 
-[upload]
-default_provider = "evolink"
-
-[upload.providers.evolink]
-type = "evolink"
-
-[upload.providers.maxqi]
-type = "lsky"
-base_url = "https://p.maxqi.top/api/v1"
-token = ""
-strategy_id = 0
-
-[billing]
-signup_credits = 20
-image_base_cost = 2
-image_input_cost = 1
-high_quality_multiplier = 4
-low_quality_multiplier = 0.25
-
-[evolink]
-api_key = "YOUR_EVOLINK_API_KEY"
-base_url = "https://api.evolink.ai"
-files_base_url = "https://files-api.evolink.ai"
-model = "gpt-image-2"
-poll_interval_seconds = 3
-poll_timeout_seconds = 3600
-
-[llm]
-# Use "openai_compatible" for ChatGPT-compatible chat-completions APIs.
-# Keep "builtin" to run without an LLM while developing.
-provider = "builtin"
-base_url = "https://api.openai.com/v1"
-api_key = "YOUR_LLM_API_KEY"
-planner_model = "gpt-4.1"
-title_model = "gpt-4.1-mini"
-timeout_seconds = 45
-max_context_messages = 12
+# Runtime settings such as LLM providers, upload providers, image providers,
+# billing rules, signup credits, and default planner/title models are stored
+# in SQLite and managed from the admin System Settings page.
+#
+# Existing config.toml files may still keep the old runtime sections; they are
+# used only as first-run seed values when the database has no runtime settings.
