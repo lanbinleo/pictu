@@ -87,13 +87,7 @@ function AppRoutes({ token }: { token: string }) {
     <Routes>
       <Route path="/login" element={<Navigate to="/new" replace />} />
       <Route path="/" element={<Navigate to="/new" replace />} />
-      <Route path="/new" element={<Workspace />} />
-      <Route path="/chat/:conversationId" element={<Workspace />} />
-      <Route path="/search" element={<Workspace />} />
-      <Route path="/gallery" element={<Workspace />} />
-      <Route path="/settings" element={<Workspace />} />
-      <Route path="/admin" element={<Workspace />} />
-      <Route path="*" element={<Navigate to="/new" replace />} />
+      <Route path="*" element={<Workspace />} />
     </Routes>
   )
 }
@@ -156,6 +150,7 @@ function Workspace() {
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null)
+  const detailRequestId = useRef(0)
   const routePath = location.pathname
   const isNewRoute = routePath === '/new'
   const isChatRoute = routePath.startsWith('/chat/')
@@ -164,6 +159,7 @@ function Workspace() {
   const isGalleryRoute = routePath === '/gallery'
   const isSettingsRoute = routePath === '/settings'
   const isAdminRoute = routePath === '/admin'
+  const isKnownRoute = isWorkspaceRoute || isSearchRoute || isGalleryRoute || isSettingsRoute || isAdminRoute
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -187,8 +183,7 @@ function Workspace() {
       if (session) {
         if (activeSessionId !== session.id) setActiveSessionId(session.id)
         if (!detail || detail.session.id !== session.id) {
-          const next = await api.getSession(session.id)
-          setDetail(next)
+          await refreshDetail(session.id)
         }
       } else if (items.length > 0) {
         setError('会话不存在')
@@ -205,7 +200,9 @@ function Workspace() {
 
   async function refreshDetail(id = activeSessionId) {
     if (!id) return
+    const requestId = ++detailRequestId.current
     const next = await api.getSession(id)
+    if (requestId !== detailRequestId.current) return
     setDetail(next)
   }
 
@@ -246,6 +243,10 @@ function Workspace() {
       navigate(next ? `/chat/${next.public_id}` : '/new', { replace: true })
     }
   }
+
+  useEffect(() => {
+    detailRequestId.current += 1
+  }, [activeSessionId])
 
   useEffect(() => {
     api.me().then((res) => setUser(res.user)).catch(() => clearAuth())
@@ -298,6 +299,11 @@ function Workspace() {
       setToolDraft(null)
     }
   }, [detail?.tasks, toolDraft, activeSessionId, streamingSessionId])
+
+  useEffect(() => {
+    if (isKnownRoute) return
+    navigate('/new', { replace: true })
+  }, [isKnownRoute, navigate])
 
   const tasks = detail?.tasks ?? []
   const assets = detail?.assets ?? []
