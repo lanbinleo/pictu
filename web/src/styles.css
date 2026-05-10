@@ -1810,8 +1810,10 @@ pre {
   max-width: none;
   margin: 0 auto;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 16px;
 }
 
 .gallery-toolbar {
@@ -1819,7 +1821,6 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 20px;
   flex-wrap: wrap;
 }
 
@@ -1855,7 +1856,6 @@ pre {
 }
 
 .gallery-masonry {
-  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
