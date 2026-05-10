@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
   Archive,
   BarChart3,
@@ -135,7 +135,6 @@ function Workspace() {
   const setLocale = useAppStore((s) => s.setLocale)
   const navigate = useNavigate()
   const location = useLocation()
-  const { conversationId = '' } = useParams()
   const [sessions, setSessions] = useState<Session[]>([])
   const [detail, setDetail] = useState<SessionDetail | null>(null)
   const [mobilePanel, setMobilePanel] = useState(false)
@@ -154,6 +153,7 @@ function Workspace() {
   const routePath = location.pathname
   const isNewRoute = routePath === '/new'
   const isChatRoute = routePath.startsWith('/chat/')
+  const conversationId = isChatRoute ? routePath.slice('/chat/'.length).split('/')[0] ?? '' : ''
   const isWorkspaceRoute = isNewRoute || isChatRoute
   const isSearchRoute = routePath === '/search'
   const isGalleryRoute = routePath === '/gallery'
@@ -181,6 +181,7 @@ function Workspace() {
     if (isChatRoute) {
       const session = items.find((item) => item.public_id === conversationId)
       if (session) {
+        setError((current) => (current === '会话不存在' ? '' : current))
         if (activeSessionId !== session.id) setActiveSessionId(session.id)
         if (!detail || detail.session.id !== session.id) {
           await refreshDetail(session.id)
