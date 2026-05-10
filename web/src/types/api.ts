@@ -11,6 +11,7 @@ export type User = {
 
 export type Session = {
   id: number
+  public_id: string
   tenant_id: number
   user_id: number
   title: string
@@ -47,6 +48,7 @@ export type Message = {
 export type Task = {
   id: number
   session_id: number
+  provider: string
   provider_task_id: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
   progress: number
@@ -159,6 +161,7 @@ export type RuntimeLLMProvider = {
   timeout_seconds: number
   max_context_messages: number
   credit_multiplier: number
+  allow_user_select: boolean
   enabled: boolean
 }
 
@@ -181,6 +184,7 @@ export type RuntimeImageProvider = {
   api_key: string
   model: string
   credit_multiplier: number
+  allow_user_select: boolean
   enabled: boolean
 }
 

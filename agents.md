@@ -7,7 +7,7 @@ This file is the first stop for anyone changing this repo.
 - Use Git for all development work.
 - Keep changes grouped by feature or milestone.
 - After finishing a meaningful piece of work, make a commit before moving on.
-- Work on the matching `dev/x.x.x` branch for the current release line. This repo is currently on `dev/1.0.0`.
+- Work on the matching `dev/x.x.x` branch for the current release line.
 - Keep release work on the same `dev/x.x.x` branch until the change set is ready.
 - Use a PR for publishing and merge through that PR. Once a release PR is opened for already-reviewed code, carry it through to merge without leaving it in a waiting state.
 - Do not overwrite unrelated user changes.
@@ -76,4 +76,4 @@ Start here before opening the whole tree:
 - The first registered user becomes admin.
 - Existing database content should be migrated forward when possible.
 - Default values should exist for new runtime settings so a fresh install works.
-- Current release line: `1.0.0`.
+- Read the current release version from the root `VERSION` file.

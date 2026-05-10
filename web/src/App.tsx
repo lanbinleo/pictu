@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   Archive,
   BarChart3,
@@ -38,7 +39,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from './lib/api'
-import { useAppStore, type Page } from './store/appStore'
+import { useAppStore } from './store/appStore'
 import type { AdminStats, Asset, GenerateResponse, GenerationPlan, Message, RuntimeSettings, Session, SessionDetail, Task, UsageBucket, UsageResponse, User } from './types/api'
 import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from './i18n'
 
@@ -65,8 +66,36 @@ export function App() {
     document.documentElement.dataset.theme = theme
   }, [theme])
 
-  if (!token) return <AuthScreen />
-  return <Workspace />
+  return (
+    <BrowserRouter>
+      <AppRoutes token={token} />
+    </BrowserRouter>
+  )
+}
+
+function AppRoutes({ token }: { token: string }) {
+  const location = useLocation()
+  if (!token) {
+    return (
+      <Routes>
+        <Route path="/login" element={<AuthScreen />} />
+        <Route path="*" element={<Navigate to="/login" replace state={{ next: `${location.pathname}${location.search}` }} />} />
+      </Routes>
+    )
+  }
+  return (
+    <Routes>
+      <Route path="/login" element={<Navigate to="/new" replace />} />
+      <Route path="/" element={<Navigate to="/new" replace />} />
+      <Route path="/new" element={<Workspace />} />
+      <Route path="/chat/:conversationId" element={<Workspace />} />
+      <Route path="/search" element={<Workspace />} />
+      <Route path="/gallery" element={<Workspace />} />
+      <Route path="/settings" element={<Workspace />} />
+      <Route path="/admin" element={<Workspace />} />
+      <Route path="*" element={<Navigate to="/new" replace />} />
+    </Routes>
+  )
 }
 
 // ── Command parsing for Midjourney-style params ──
@@ -110,8 +139,9 @@ function Workspace() {
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const locale = useAppStore((s) => s.locale)
   const setLocale = useAppStore((s) => s.setLocale)
-  const page = useAppStore((s) => s.page)
-  const setPage = useAppStore((s) => s.setPage)
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { conversationId = '' } = useParams()
   const [sessions, setSessions] = useState<Session[]>([])
   const [detail, setDetail] = useState<SessionDetail | null>(null)
   const [mobilePanel, setMobilePanel] = useState(false)
@@ -126,6 +156,14 @@ function Workspace() {
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null)
+  const routePath = location.pathname
+  const isNewRoute = routePath === '/new'
+  const isChatRoute = routePath.startsWith('/chat/')
+  const isWorkspaceRoute = isNewRoute || isChatRoute
+  const isSearchRoute = routePath === '/search'
+  const isGalleryRoute = routePath === '/gallery'
+  const isSettingsRoute = routePath === '/settings'
+  const isAdminRoute = routePath === '/admin'
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -144,11 +182,24 @@ function Workspace() {
       }
       return items
     })
-    if (!activeSessionId && items[0]) {
+    if (isChatRoute) {
+      const session = items.find((item) => item.public_id === conversationId)
+      if (session) {
+        if (activeSessionId !== session.id) setActiveSessionId(session.id)
+        if (!detail || detail.session.id !== session.id) {
+          const next = await api.getSession(session.id)
+          setDetail(next)
+        }
+      } else if (items.length > 0) {
+        setError('会话不存在')
+      }
+      return
+    }
+    if (!isNewRoute && !activeSessionId && items[0]) {
       setActiveSessionId(items[0].id)
     } else if (activeSessionId && !items.some((i) => i.id === activeSessionId)) {
-      setActiveSessionId(items[0]?.id ?? null)
-      if (!items[0]) setDetail(null)
+      setActiveSessionId(null)
+      setDetail(null)
     }
   }
 
@@ -173,7 +224,8 @@ function Workspace() {
     setActiveSessionId(res.session.id)
     setDetail({ session: res.session, assets: [], messages: [], tasks: [] })
     setMobilePanel(false)
-    setPage('workspace')
+    navigate(`/chat/${res.session.public_id}`, { replace: true })
+    return res.session
   }
 
   async function renameSession(title: string) {
@@ -191,6 +243,7 @@ function Workspace() {
       const next = nextSessions[0]
       setActiveSessionId(next?.id ?? null)
       setDetail(null)
+      navigate(next ? `/chat/${next.public_id}` : '/new', { replace: true })
     }
   }
 
@@ -201,8 +254,22 @@ function Workspace() {
   }, [])
 
   useEffect(() => {
-    if (page === 'workspace') refreshDetail().catch((err) => setError(err.message))
-  }, [activeSessionId, page])
+    if (isChatRoute && activeSessionId) {
+      refreshDetail(activeSessionId).catch((err) => setError(err.message))
+      return
+    }
+    if (isNewRoute) {
+      setActiveSessionId(null)
+      setDetail(null)
+    }
+  }, [activeSessionId, routePath, isChatRoute, isNewRoute])
+
+  useEffect(() => {
+    if (!isChatRoute) return
+    const session = sessions.find((item) => item.public_id === conversationId)
+    if (!session) return
+    if (activeSessionId !== session.id) setActiveSessionId(session.id)
+  }, [conversationId, isChatRoute, sessions, activeSessionId])
 
   useEffect(() => {
     const running = (detail?.tasks ?? []).some((t) => t.status === 'pending' || t.status === 'processing')
@@ -242,12 +309,14 @@ function Workspace() {
   const conversationStarted = messages.length > 0 || visibleOptimisticMessages.length > 0 || tasks.length > 0 || Boolean(visibleStreamingText || visibleThinkingText || visibleToolDraft)
 
   function selectSession(id: number) {
+    const session = sessions.find((s) => s.id === id)
+    if (!session) return
     setActiveSessionId(id)
-    if (sessions.find((s) => s.id === id)?.task_status === 'completed') {
+    if (session.task_status === 'completed') {
       setCompletedNotices((c) => ({ ...c, [id]: false }))
     }
     setMobilePanel(false)
-    setPage('workspace')
+    navigate(`/chat/${session.public_id}`)
   }
 
   return (
@@ -263,13 +332,13 @@ function Workspace() {
         </div>
 
         <nav className="sidebar-nav">
-          <button className="nav-item" onClick={createSession} title="新建对话">
+          <button className="nav-item" onClick={() => navigate('/new')} title="新建对话">
             <MessageSquarePlus size={18} />{!leftCollapsed && <span>新建对话</span>}
           </button>
-          <button className="nav-item" onClick={() => setPage('chats')} title="搜索对话">
+          <button className={`nav-item ${isSearchRoute ? 'active' : ''}`} onClick={() => navigate('/search')} title="搜索对话">
             <Search size={18} />{!leftCollapsed && <span>搜索</span>}
           </button>
-          <button className={`nav-item ${page === 'gallery' ? 'active' : ''}`} onClick={() => setPage('gallery')} title="画廊">
+          <button className={`nav-item ${isGalleryRoute ? 'active' : ''}`} onClick={() => navigate('/gallery')} title="画廊">
             <Images size={18} />{!leftCollapsed && <span>画廊</span>}
           </button>
         </nav>
@@ -278,7 +347,7 @@ function Workspace() {
           <div className="session-list">
             <div className="session-list-label">最近</div>
             {sessions.map((session) => (
-              <div key={session.id} className={`session-row ${session.id === activeSessionId && page === 'workspace' ? 'active' : ''}`}>
+              <div key={session.id} className={`session-row ${session.id === activeSessionId && isChatRoute ? 'active' : ''}`}>
                 <button className="session-select" onClick={() => selectSession(session.id)} title={session.title}>
                   <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
                   <span className="session-title">{session.title}</span>
@@ -298,18 +367,18 @@ function Workspace() {
             collapsed={leftCollapsed}
             onToggleOpen={() => setUserMenuOpen((o) => !o)}
             onClose={() => setUserMenuOpen(false)}
-            onOpenSettings={() => { setPage('settings'); setUserMenuOpen(false) }}
-            onOpenAdmin={() => { setPage('admin'); setUserMenuOpen(false) }}
-            onLogout={clearAuth}
+            onOpenSettings={() => { navigate('/settings'); setUserMenuOpen(false) }}
+            onOpenAdmin={() => { navigate('/admin'); setUserMenuOpen(false) }}
+            onLogout={() => { clearAuth(); navigate('/login', { replace: true }) }}
           />
         </div>
       </aside>
 
-      {page === 'workspace' && (
+      {isWorkspaceRoute && (
         <section className="chat-panel">
           <header className="topbar">
             <button className="icon-button mobile-only" onClick={() => setMobilePanel(true)} title="菜单"><PanelLeft size={18} /></button>
-            <EditableTitle title={detail?.session.title ?? '未命名会话'} onSave={renameSession} />
+            {detail?.session ? <EditableTitle title={detail.session.title} onSave={renameSession} /> : <div className="title-line"><h1>新建对话</h1></div>}
           </header>
           {error && <p className="inline-error">{error}</p>}
           <MessageStream
@@ -328,6 +397,7 @@ function Workspace() {
               await refreshWorkspace()
               if (activeSessionId) setOptimisticMessages((i) => ({ ...i, [activeSessionId]: [] }))
             }}
+            onEnsureSession={createSession}
             setStreamingText={setStreamingText}
             setThinkingText={setThinkingText}
             setStreamingSessionId={setStreamingSessionId}
@@ -340,10 +410,10 @@ function Workspace() {
         </section>
       )}
 
-      {page === 'gallery' && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} runtimeSettings={runtimeSettings} />}
-      {page === 'chats' && <ChatsPage sessions={sessions} onSelect={selectSession} onArchive={archiveSession} onRefresh={refreshSessions} />}
-      {page === 'settings' && <SettingsPage />}
-      {page === 'admin' && user?.role === 'admin' && <AdminPage />}
+      {isGalleryRoute && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} runtimeSettings={runtimeSettings} />}
+      {isSearchRoute && <ChatsPage sessions={sessions} onSelect={selectSession} onArchive={archiveSession} onRefresh={refreshSessions} />}
+      {isSettingsRoute && <SettingsPage />}
+      {isAdminRoute && user?.role === 'admin' && <AdminPage />}
     </main>
   )
 }
@@ -512,9 +582,10 @@ function MessageStream({ messages, tasks, streamingText, thinkingText, toolDraft
 
 // ── Composer ──
 
-function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingText, setStreamingSessionId, setToolDraft, setOptimisticMessages, pendingRequest, setPendingRequest, conversationStarted, runtimeSettings }: {
+function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingText, setThinkingText, setStreamingSessionId, setToolDraft, setOptimisticMessages, pendingRequest, setPendingRequest, conversationStarted, runtimeSettings }: {
   sessionId: number | null; assets: Asset[]; conversationStarted: boolean
   onChanged: () => void | Promise<void>
+  onEnsureSession: () => Promise<Session | null>
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
   setThinkingText: React.Dispatch<React.SetStateAction<string>>
   setStreamingSessionId: React.Dispatch<React.SetStateAction<number | null>>
@@ -552,6 +623,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
   const [imageProvider, setImageProvider] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const actionsRef = useRef<HTMLDivElement | null>(null)
   const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
   const galleryAssets = useMemo(() => uniqueAssets([...visibleAssets, ...libraryAssets]), [visibleAssets, libraryAssets])
   const selectedAssets = galleryAssets.filter((a) => selectedAssetIds.includes(a.id))
@@ -602,6 +674,29 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`
   }, [draft])
 
+  useEffect(() => {
+    if (!settingsOpen && !assetGalleryOpen) return
+    function handleClick(event: MouseEvent) {
+      if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
+        setSettingsOpen(false)
+        setAssetGalleryOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [settingsOpen, assetGalleryOpen])
+
+  async function ensureTargetSession() {
+    if (sessionId) return sessionId
+    try {
+      const session = await onEnsureSession()
+      return session?.id ?? null
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '创建会话失败')
+      return null
+    }
+  }
+
   async function requestGenerate(
     targetSessionId: number, message: string, assetIds: number[], baseSettings: typeof settings,
     extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string },
@@ -635,30 +730,34 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!sessionId || !draft.trim()) return
-    const { cleanText, overrides } = parseCommands(draft)
-    const submitted = cleanText.trim() || draft.trim()
-    const submittedAssetIds = [...selectedAssetIds]
-    const submittedSettings = { ...settings, ...overrides }
-    const submittedAssets = assets.filter((a) => submittedAssetIds.includes(a.id))
-    const now = new Date().toISOString()
-    setOptimisticMessages((items) => ({
-      ...items,
-      [sessionId]: [{ id: -Date.now(), session_id: sessionId, role: 'user', content: withReferenceMarkdown(submitted, submittedAssets), created_at: now }],
-    }))
-    setDraft('')
-    clearSelectedAssets()
+    if (!draft.trim()) return
     setBusy(true)
     setError('')
-    setStreamingSessionId(sessionId)
-    setStreamingText('')
-    setThinkingText('')
-    setToolDraft(null)
+    let submittedSessionId: number | null = sessionId
     let keepStream = false
     let completed = false
     let toolUsed = false
     try {
-      await api.generateStream(sessionId, {
+      const targetSessionId = await ensureTargetSession()
+      if (!targetSessionId) return
+      submittedSessionId = targetSessionId
+      const { cleanText, overrides } = parseCommands(draft)
+      const submitted = cleanText.trim() || draft.trim()
+      const submittedAssetIds = [...selectedAssetIds]
+      const submittedSettings = { ...settings, ...overrides }
+      const submittedAssets = assets.filter((a) => submittedAssetIds.includes(a.id))
+      const now = new Date().toISOString()
+      setOptimisticMessages((items) => ({
+        ...items,
+        [targetSessionId]: [{ id: -Date.now(), session_id: targetSessionId, role: 'user', content: withReferenceMarkdown(submitted, submittedAssets), created_at: now }],
+      }))
+      setDraft('')
+      clearSelectedAssets()
+      setStreamingSessionId(targetSessionId)
+      setStreamingText('')
+      setThinkingText('')
+      setToolDraft(null)
+      await api.generateStream(targetSessionId, {
         message: submitted, asset_ids: submittedAssetIds, use_planner: usePlanner,
         planner_provider: selectedPlannerProvider, planner_model: selectedPlannerModel, image_provider: selectedImageProvider,
         ...submittedSettings,
@@ -667,26 +766,32 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
         else if (event.type === 'thinking') setThinkingText((t) => t + event.text)
         else if (event.type === 'confirm') {
           keepStream = true; toolUsed = true
-          setPendingRequest({ sessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
+          setPendingRequest({ sessionId: targetSessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
         } else if (event.type === 'done') {
           completed = true
           if (event.plan?.tool_called) {
             toolUsed = true
-            setToolDraft((c) => c?.sessionId === sessionId
+            setToolDraft((c) => c?.sessionId === targetSessionId
               ? { ...c, phase: 'calling', prompt: event.plan.prompt || c.prompt }
-              : { sessionId, phase: 'calling', prompt: event.plan.prompt, raw: '' })
+              : { sessionId: targetSessionId, phase: 'calling', prompt: event.plan.prompt, raw: '' })
           }
         } else if (event.type === 'error') setError(event.error)
         else if (event.type === 'tool') {
           toolUsed = true
-          setToolDraft((c) => ({ sessionId, phase: event.phase, raw: (c?.sessionId === sessionId ? c.raw : '') + (event.text ?? ''), prompt: event.prompt ?? c?.prompt ?? '' }))
+          setToolDraft((c) => ({ sessionId: targetSessionId, phase: event.phase, raw: (c?.sessionId === targetSessionId ? c.raw : '') + (event.text ?? ''), prompt: event.prompt ?? c?.prompt ?? '' }))
         }
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成失败')
     } finally {
       setBusy(false)
-      if (completed) await onChanged()
+      if (completed) {
+        await onChanged()
+        const sessionIdForCleanup = submittedSessionId
+        if (sessionIdForCleanup !== null) {
+          setOptimisticMessages((items) => ({ ...items, [sessionIdForCleanup]: [] }))
+        }
+      }
       if (!keepStream && !toolUsed) { setStreamingText(''); setThinkingText(''); setStreamingSessionId(null); setToolDraft(null) }
     }
   }
@@ -700,13 +805,15 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
   }
 
   async function uploadFiles(files: FileList | File[] | null) {
-    if (!sessionId || !files || files.length === 0) return
+    if (!files || files.length === 0) return
+    const targetSessionId = await ensureTargetSession()
+    if (!targetSessionId) return
     setUploading(true)
     setError('')
     try {
       for (const file of Array.from(files)) {
         if (file.type.startsWith('image/')) {
-          const res = await api.uploadAsset(sessionId, file, uploadProvider)
+          const res = await api.uploadAsset(targetSessionId, file, uploadProvider)
           selectAsset(res.asset.id)
           setLibraryAssets((items) => uniqueAssets([res.asset, ...items]))
         }
@@ -720,11 +827,12 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
   }
 
   async function useGalleryAsset(asset: Asset) {
-    if (!sessionId) return
+    const targetSessionId = await ensureTargetSession()
+    if (!targetSessionId) return
     setError('')
     try {
-      if (asset.session_id === sessionId) { toggleAsset(asset.id); return }
-      const res = await api.useAsset(sessionId, asset.id)
+      if (asset.session_id === targetSessionId) { toggleAsset(asset.id); return }
+      const res = await api.useAsset(targetSessionId, asset.id)
       selectAsset(res.asset.id)
       setLibraryAssets((items) => uniqueAssets([res.asset, ...items]))
       await Promise.all([onChanged(), loadAssetGallery()])
@@ -772,7 +880,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
               {Object.entries(parsedCommands.overrides).map(([k, v]) => <span key={k} className="param-tag">{k}: {String(v)}</span>)}
             </div>
           )}
-          <div className="composer-actions">
+          <div className="composer-actions" ref={actionsRef}>
             <button type="button" className="icon-button" onClick={openAssetGallery} title="参考图库">
               {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
             </button>
@@ -798,7 +906,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
               <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
             </label>
             <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数"><Settings2 size={18} /></button>
-            <button className="send-button" disabled={busy || !sessionId} title="发送">
+            <button className="send-button" disabled={busy || !draft.trim()} title="发送">
               {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
             </button>
           </div>
@@ -818,7 +926,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
           onKeepMine={() => confirmWith(pendingRequest.settings)}
           onCancel={() => {
             setPendingRequest(null)
-            setOptimisticMessages((items) => (sessionId ? { ...items, [sessionId]: [] } : items))
+            setOptimisticMessages((items) => ({ ...items, [pendingRequest.sessionId]: [] }))
             setStreamingText(''); setThinkingText(''); setStreamingSessionId(null); setError('已取消')
           }}
         />
@@ -835,8 +943,8 @@ function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, run
   plannerProvider: string; setPlannerProvider: (v: string) => void; plannerModel: string; setPlannerModel: (v: string) => void
   imageProvider: string; setImageProvider: (v: string) => void; onClose: () => void
 }) {
-  const locale = useAppStore((s) => s.locale)
-  const selectedProvider = runtimeSettings?.llm_providers.find((p) => p.id === plannerProvider)
+  const plannerProviders = runtimeSettings?.llm_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
+  const selectedPlannerId = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
   return (
     <div className="settings-popover" onClick={(e) => e.stopPropagation()}>
       <div className="settings-popover-head">
@@ -851,23 +959,19 @@ function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, run
       {runtimeSettings && (
         <div className="settings-controls planner-settings-controls">
           <label>
-            Planner
-            <select value={plannerProvider} onChange={(e) => {
+            Planner 模型
+            <select value={selectedPlannerId} onChange={(e) => {
               const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
               setPlannerProvider(e.target.value)
               setPlannerModel(next?.planner_model || '')
             }}>
-              {runtimeSettings.llm_providers.filter((p) => p.enabled).map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+              {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
             </select>
-          </label>
-          <label>
-            Planner model
-            <input value={plannerModel || selectedProvider?.planner_model || ''} onChange={(e) => setPlannerModel(e.target.value)} />
           </label>
           <label>
             图片 provider
             <select value={imageProvider} onChange={(e) => setImageProvider(e.target.value)}>
-              {runtimeSettings.image_providers.filter((p) => p.enabled).map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+              {runtimeSettings.image_providers.filter((p) => p.enabled && p.allow_user_select).map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
             </select>
           </label>
         </div>
@@ -1628,7 +1732,7 @@ function AdminPage() {
 }
 
 function AdminSystemSettings({ settings, onChange, onSave }: { settings: RuntimeSettings; onChange: (settings: RuntimeSettings) => void; onSave: (settings: RuntimeSettings) => void }) {
-  const [section, setSection] = useState<'basic' | 'llm' | 'upload' | 'billing' | 'image'>('basic')
+  const [section, setSection] = useState<'basic' | 'models' | 'llm' | 'upload' | 'billing' | 'image'>('basic')
   const patch = (next: Partial<RuntimeSettings>) => onChange({ ...settings, ...next })
   const patchDefaults = (next: Partial<RuntimeSettings['defaults']>) => patch({ defaults: { ...settings.defaults, ...next } })
   const patchBilling = (next: Partial<RuntimeSettings['billing']>) => patch({ billing: { ...settings.billing, ...next } })
@@ -1644,6 +1748,7 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
     <div className="settings-layout admin-settings-layout">
       <nav className="settings-nav">
         <button type="button" className={section === 'basic' ? 'active' : ''} onClick={() => setSection('basic')}><Settings2 size={16} /><span>基础设置</span></button>
+        <button type="button" className={section === 'models' ? 'active' : ''} onClick={() => setSection('models')}><Sparkles size={16} /><span>模型管理</span></button>
         <button type="button" className={section === 'llm' ? 'active' : ''} onClick={() => setSection('llm')}><Sparkles size={16} /><span>LLM providers</span></button>
         <button type="button" className={section === 'upload' ? 'active' : ''} onClick={() => setSection('upload')}><ImagePlus size={16} /><span>上传 / 图床</span></button>
         <button type="button" className={section === 'image' ? 'active' : ''} onClick={() => setSection('image')}><Camera size={16} /><span>图片 provider</span></button>
@@ -1661,9 +1766,24 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
             <label><span>默认图片 provider</span><select value={settings.defaults.image_provider} onChange={(e) => patchDefaults({ image_provider: e.target.value })}>{settings.image_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
           </section>
         )}
+        {section === 'models' && (
+          <section className="panel-block provider-list">
+            <h3>模型管理</h3>
+            {settings.llm_providers.map((p, i) => (
+              <div className="provider-editor" key={`model-${p.id}-${i}`}>
+                <label><span>名称</span><input value={p.name} onChange={(e) => patchLLM(i, { name: e.target.value })} /></label>
+                <label><span>Planner model</span><input value={p.planner_model} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
+                <label><span>Title model</span><input value={p.title_model} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
+                <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchLLM(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.allow_user_select} onChange={(e) => patchLLM(i, { allow_user_select: e.target.checked })} /><span>允许用户选择</span></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchLLM(i, { enabled: e.target.checked })} /><span>启用</span></label>
+              </div>
+            ))}
+          </section>
+        )}
         {section === 'llm' && (
           <section className="panel-block provider-list">
-            <div className="panel-head"><h3>LLM providers</h3><button type="button" className="secondary-button" onClick={() => patch({ llm_providers: [...settings.llm_providers, { id: `llm-${settings.llm_providers.length + 1}`, name: 'New LLM', type: 'openai_compatible', base_url: '', api_key: '', planner_model: '', title_model: '', timeout_seconds: 45, max_context_messages: 12, credit_multiplier: 1, enabled: true }] })}><Plus size={16} />新增</button></div>
+            <div className="panel-head"><h3>LLM providers</h3><button type="button" className="secondary-button" onClick={() => patch({ llm_providers: [...settings.llm_providers, { id: `llm-${settings.llm_providers.length + 1}`, name: 'New LLM', type: 'openai_compatible', base_url: '', api_key: '', planner_model: '', title_model: '', timeout_seconds: 45, max_context_messages: 12, credit_multiplier: 1, allow_user_select: true, enabled: true }] })}><Plus size={16} />新增</button></div>
             {settings.llm_providers.map((p, i) => (
               <div className="provider-editor" key={`${p.id}-${i}`}>
                 <label><span>ID</span><input value={p.id} onChange={(e) => patchLLM(i, { id: e.target.value })} /></label>
@@ -1674,6 +1794,7 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
                 <label><span>Planner model</span><input value={p.planner_model} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
                 <label><span>Title model</span><input value={p.title_model} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
                 <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchLLM(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.allow_user_select} onChange={(e) => patchLLM(i, { allow_user_select: e.target.checked })} /><span>允许用户选择</span></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchLLM(i, { enabled: e.target.checked })} /><span>启用</span></label>
               </div>
             ))}
@@ -1702,12 +1823,13 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
               <div className="provider-editor" key={`${p.id}-${i}`}>
                 <label><span>ID</span><input value={p.id} onChange={(e) => patchImage(i, { id: e.target.value })} /></label>
                 <label><span>名称</span><input value={p.name} onChange={(e) => patchImage(i, { name: e.target.value })} /></label>
-                <label><span>类型</span><select value={p.type} onChange={(e) => patchImage(i, { type: e.target.value })}><option value="evolink">evolink</option></select></label>
+                <label><span>类型</span><select value={p.type} onChange={(e) => patchImage(i, { type: e.target.value })}><option value="evolink">evolink</option><option value="right_codes">right_codes</option></select></label>
                 <label><span>Model</span><input value={p.model} onChange={(e) => patchImage(i, { model: e.target.value })} /></label>
                 <label><span>Base URL</span><input value={p.base_url} onChange={(e) => patchImage(i, { base_url: e.target.value })} /></label>
                 <label><span>Files Base URL</span><input value={p.files_base_url} onChange={(e) => patchImage(i, { files_base_url: e.target.value })} /></label>
                 <label><span>API Key</span><input value={p.api_key} onChange={(e) => patchImage(i, { api_key: e.target.value })} /></label>
                 <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchImage(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.allow_user_select} onChange={(e) => patchImage(i, { allow_user_select: e.target.checked })} /><span>允许用户选择</span></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchImage(i, { enabled: e.target.checked })} /><span>启用</span></label>
               </div>
             ))}
@@ -1844,6 +1966,8 @@ function AuthScreen() {
   const setAuth = useAppStore((s) => s.setAuth)
   const toggleTheme = useAppStore((s) => s.toggleTheme)
   const theme = useAppStore((s) => s.theme)
+  const navigate = useNavigate()
+  const location = useLocation()
   const [mode, setMode] = useState<'login' | 'register'>('register')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -1860,6 +1984,8 @@ function AuthScreen() {
         ? await api.register({ email, password, display_name: displayName })
         : await api.login({ email, password })
       setAuth(res.token, res.user)
+      const next = new URLSearchParams(location.search).get('next') || (location.state as { next?: string } | null)?.next || '/new'
+      navigate(next, { replace: true })
     } catch (err) {
       setError(err instanceof Error ? err.message : '请求失败')
     } finally {

@@ -622,7 +622,7 @@ func (s *Server) generate(c *gin.Context) {
 	if imageProviderID == "" {
 		imageProviderID = settings.Defaults.ImageProvider
 	}
-	imageProvider, ok := settings.imageProvider(imageProviderID)
+	imageProvider, ok := settings.selectableImageProvider(imageProviderID)
 	if !ok {
 		fail(c, http.StatusBadRequest, "unknown image provider")
 		return
@@ -647,22 +647,25 @@ func (s *Server) generate(c *gin.Context) {
 		Quality:    plan.Quality,
 		N:          plan.Count,
 	}
-	imageClient := evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, imageProvider))
-	task, err := imageClient.CreateImage(c, evReq)
+	task, err := s.createImageTask(c.Request.Context(), imageProvider, evReq)
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
 		fail(c, http.StatusBadGateway, err.Error())
 		return
 	}
 	reqJSON, _ := json.Marshal(evReq)
-	localTask, err := s.store.CreateTask(c, user, sessionID, task.ID, task.Status, task.Progress, cost, plan.Prompt, string(reqJSON))
+	localTask, err := s.store.CreateTask(c, user, sessionID, imageProvider.ID, task.ID, task.Status, task.Progress, cost, plan.Prompt, string(reqJSON))
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
-	go s.pollTask(task.ID)
+	if task.Status == "completed" {
+		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), task)
+	} else {
+		go s.pollTask(task.ID)
+	}
 	c.JSON(http.StatusOK, gin.H{"plan": plan, "task": localTask, "message": msg, "generated": true})
 }
 
@@ -786,7 +789,7 @@ func (s *Server) generateStream(c *gin.Context) {
 	if imageProviderID == "" {
 		imageProviderID = settings.Defaults.ImageProvider
 	}
-	imageProvider, ok := settings.imageProvider(imageProviderID)
+	imageProvider, ok := settings.selectableImageProvider(imageProviderID)
 	if !ok {
 		_ = flush("error", gin.H{"error": "unknown image provider"})
 		return
@@ -807,22 +810,25 @@ func (s *Server) generateStream(c *gin.Context) {
 		N:          plan.Count,
 	}
 	_ = flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt})
-	imageClient := evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, imageProvider))
-	task, err := imageClient.CreateImage(c, evReq)
+	task, err := s.createImageTask(c.Request.Context(), imageProvider, evReq)
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
 		_ = flush("error", gin.H{"error": err.Error()})
 		return
 	}
 	reqJSON, _ := json.Marshal(evReq)
-	localTask, err := s.store.CreateTask(c, user, sessionID, task.ID, task.Status, task.Progress, cost, plan.Prompt, string(reqJSON))
+	localTask, err := s.store.CreateTask(c, user, sessionID, imageProvider.ID, task.ID, task.Status, task.Progress, cost, plan.Prompt, string(reqJSON))
 	if err != nil {
 		_ = flush("error", gin.H{"error": err.Error()})
 		return
 	}
 	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
-	go s.pollTask(task.ID)
+	if task.Status == "completed" {
+		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), task)
+	} else {
+		go s.pollTask(task.ID)
+	}
 	_ = flush("done", gin.H{"plan": plan, "task": localTask, "message": msg, "generated": true})
 }
 
@@ -981,9 +987,13 @@ func (s *Server) pollTask(providerTaskID string) {
 	defer cancel()
 	ticker := time.NewTicker(s.cfg.Evolink.PollInterval())
 	defer ticker.Stop()
+	task, _, err := s.store.GetTaskByProviderID(context.Background(), providerTaskID)
+	if err != nil || task.Provider == "" {
+		task.Provider = "evolink"
+	}
 	client := s.evolink
 	if settings, err := s.runtimeSettings(context.Background()); err == nil {
-		if provider, ok := settings.imageProvider(settings.Defaults.ImageProvider); ok {
+		if provider, ok := settings.imageProvider(task.Provider); ok && provider.Type == "evolink" {
 			client = evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, provider))
 		}
 	}

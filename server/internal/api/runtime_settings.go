@@ -50,6 +50,7 @@ type RuntimeLLMProvider struct {
 	TimeoutSeconds     int     `json:"timeout_seconds"`
 	MaxContextMessages int     `json:"max_context_messages"`
 	CreditMultiplier   float64 `json:"credit_multiplier"`
+	AllowUserSelect    *bool   `json:"allow_user_select,omitempty"`
 	Enabled            bool    `json:"enabled"`
 }
 
@@ -72,6 +73,7 @@ type RuntimeImageProvider struct {
 	APIKey           string  `json:"api_key"`
 	Model            string  `json:"model"`
 	CreditMultiplier float64 `json:"credit_multiplier"`
+	AllowUserSelect  *bool   `json:"allow_user_select,omitempty"`
 	Enabled          bool    `json:"enabled"`
 }
 
@@ -118,6 +120,7 @@ func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
 			TimeoutSeconds:     timeout,
 			MaxContextMessages: maxContext,
 			CreditMultiplier:   1,
+			AllowUserSelect:    boolPtr(true),
 			Enabled:            true,
 		}},
 		ImageProviders: []RuntimeImageProvider{{
@@ -129,6 +132,17 @@ func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
 			APIKey:           cfg.Evolink.APIKey,
 			Model:            cfg.Evolink.Model,
 			CreditMultiplier: 1,
+			AllowUserSelect:  boolPtr(true),
+			Enabled:          true,
+		}, {
+			ID:               "right-codes",
+			Name:             "Right Code Draw",
+			Type:             "right_codes",
+			BaseURL:          "https://www.right.codes/draw",
+			APIKey:           "",
+			Model:            "gpt-image-2",
+			CreditMultiplier: 1,
+			AllowUserSelect:  boolPtr(true),
 			Enabled:          true,
 		}},
 	}
@@ -227,6 +241,9 @@ func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 		if settings.LLMProviders[i].CreditMultiplier <= 0 {
 			settings.LLMProviders[i].CreditMultiplier = 1
 		}
+		if settings.LLMProviders[i].AllowUserSelect == nil {
+			settings.LLMProviders[i].AllowUserSelect = boolPtr(true)
+		}
 	}
 	for i := range settings.UploadProviders {
 		settings.UploadProviders[i].ID = cleanID(settings.UploadProviders[i].ID)
@@ -248,6 +265,9 @@ func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 		if settings.ImageProviders[i].CreditMultiplier <= 0 {
 			settings.ImageProviders[i].CreditMultiplier = 1
 		}
+		if settings.ImageProviders[i].AllowUserSelect == nil {
+			settings.ImageProviders[i].AllowUserSelect = boolPtr(true)
+		}
 	}
 	settings.Defaults.PlannerProvider = cleanID(settings.Defaults.PlannerProvider)
 	settings.Defaults.TitleProvider = cleanID(settings.Defaults.TitleProvider)
@@ -268,6 +288,14 @@ func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	return settings
 }
 
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func boolValue(v *bool) bool {
+	return v != nil && *v
+}
+
 func cleanID(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, " ", "-")
@@ -280,6 +308,17 @@ func (settings RuntimeSettings) llmProvider(id string) (RuntimeLLMProvider, bool
 		if provider.ID == id && provider.Enabled {
 			return provider, true
 		}
+	}
+	return RuntimeLLMProvider{}, false
+}
+
+func (settings RuntimeSettings) selectableLLMProvider(id string) (RuntimeLLMProvider, bool) {
+	provider, ok := settings.llmProvider(id)
+	if !ok {
+		return RuntimeLLMProvider{}, false
+	}
+	if boolValue(provider.AllowUserSelect) || provider.ID == settings.Defaults.PlannerProvider {
+		return provider, true
 	}
 	return RuntimeLLMProvider{}, false
 }
@@ -304,11 +343,22 @@ func (settings RuntimeSettings) imageProvider(id string) (RuntimeImageProvider, 
 	return RuntimeImageProvider{}, false
 }
 
+func (settings RuntimeSettings) selectableImageProvider(id string) (RuntimeImageProvider, bool) {
+	provider, ok := settings.imageProvider(id)
+	if !ok {
+		return RuntimeImageProvider{}, false
+	}
+	if boolValue(provider.AllowUserSelect) || provider.ID == settings.Defaults.ImageProvider {
+		return provider, true
+	}
+	return RuntimeImageProvider{}, false
+}
+
 func plannerConfig(settings RuntimeSettings, providerID, model string) (config.LLMConfig, RuntimeLLMProvider) {
 	if providerID == "" {
 		providerID = settings.Defaults.PlannerProvider
 	}
-	provider, ok := settings.llmProvider(providerID)
+	provider, ok := settings.selectableLLMProvider(providerID)
 	if !ok {
 		provider, _ = settings.llmProvider(settings.Defaults.PlannerProvider)
 	}
@@ -331,7 +381,7 @@ func plannerConfig(settings RuntimeSettings, providerID, model string) (config.L
 }
 
 func titleConfig(settings RuntimeSettings) config.LLMConfig {
-	provider, ok := settings.llmProvider(settings.Defaults.TitleProvider)
+	provider, ok := settings.selectableLLMProvider(settings.Defaults.TitleProvider)
 	if !ok {
 		provider, _ = settings.llmProvider(settings.Defaults.PlannerProvider)
 	}
