@@ -1480,7 +1480,6 @@ function AdminPage() {
           <button type="button" className={tab === 'ledger' ? 'active' : ''} onClick={() => setTab('ledger')}><ScrollText size={16} /><span>日志</span></button>
         </nav>
         {error && <p className="form-error">{error}</p>}
-
         {tab === 'overview' && stats && (
           <>
             <div className="metric-grid">
@@ -1489,6 +1488,7 @@ function AdminPage() {
               <Metric label="任务" value={stats.total_tasks} />
               <Metric label="消耗点数" value={stats.total_credits_spent} />
             </div>
+            <br></br>
             <section className="panel-block">
               <div className="panel-head">
                 <h3>{statsGranularity === 'hour' ? '近 24 小时消耗' : '近 30 天消耗'}</h3>
