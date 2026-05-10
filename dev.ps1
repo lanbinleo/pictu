@@ -5,20 +5,25 @@ $webDir = Join-Path $root 'web'
 $serverDir = Join-Path $root 'server'
 $backend = $null
 $backendPort = 8080
+$frontendPort = 5173
 
-function Assert-PortFree {
+function Stop-ListeningPort {
   param([int]$Port)
 
-  $listener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($listener) {
-    $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
-    $label = if ($owner) { "$($owner.ProcessName) (PID $($owner.Id))" } else { "PID $($listener.OwningProcess)" }
-    throw "端口 $Port 已被 $label 占用。PicTu 启动脚本不会结束它，请先手动处理占用或改用别的端口。"
+  $pids = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique
+  foreach ($pid in $pids) {
+    if (-not $pid) { continue }
+    $owner = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    $label = if ($owner) { "$($owner.ProcessName) (PID $($owner.Id))" } else { "PID $pid" }
+    Write-Host "停止占用端口 $Port 的进程：$label"
+    Stop-Process -Id $pid -Force -ErrorAction Stop
   }
 }
 
 try {
-  Assert-PortFree -Port $backendPort
+  Stop-ListeningPort -Port $backendPort
+  Stop-ListeningPort -Port $frontendPort
 
   if (-not (Test-Path (Join-Path $webDir 'node_modules'))) {
     Push-Location $webDir
