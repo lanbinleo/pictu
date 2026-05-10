@@ -230,6 +230,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			ref_id text not null default '',
 			created_at datetime not null default current_timestamp
 		)`,
+		`create table if not exists system_settings (
+			key text primary key,
+			value text not null,
+			updated_at datetime not null default current_timestamp
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -257,6 +262,32 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) GetSystemSetting(ctx context.Context, key string) (string, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `select value from system_settings where key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return value, err
+}
+
+func (s *Store) SaveSystemSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `insert into system_settings (key, value, updated_at) values (?, ?, current_timestamp)
+		on conflict(key) do update set value = excluded.value, updated_at = current_timestamp`, key, value)
+	return err
+}
+
+func (s *Store) EnsureSystemSetting(ctx context.Context, key, value string) error {
+	var existing int
+	if err := s.db.QueryRowContext(ctx, `select count(*) from system_settings where key = ?`, key).Scan(&existing); err != nil {
+		return err
+	}
+	if existing > 0 {
+		return nil
+	}
+	return s.SaveSystemSetting(ctx, key, value)
 }
 
 func (s *Store) CreateUserWithTenant(ctx context.Context, email, passwordHash, displayName string, signupCredits int) (User, error) {
@@ -845,8 +876,14 @@ func (s *Store) ListLedger(ctx context.Context, user User, limit int) ([]CreditL
 
 func (s *Store) UsageSummary(ctx context.Context, user User) (UsageSummary, error) {
 	summary := UsageSummary{Credits: user.Credits}
-	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'completed' then 1 else 0 end), 0), coalesce(sum(case when status = 'failed' then 1 else 0 end), 0), coalesce(sum(cost), 0) from tasks where tenant_id = ? and user_id = ?`, user.TenantID, user.ID).
-		Scan(&summary.GeneratedTasks, &summary.CompletedTasks, &summary.FailedTasks, &summary.CreditsSpent)
+	err := s.db.QueryRowContext(ctx, `select count(*), coalesce(sum(case when status = 'completed' then 1 else 0 end), 0), coalesce(sum(case when status = 'failed' then 1 else 0 end), 0) from tasks where tenant_id = ? and user_id = ?`, user.TenantID, user.ID).
+		Scan(&summary.GeneratedTasks, &summary.CompletedTasks, &summary.FailedTasks)
+	if err != nil {
+		return UsageSummary{}, err
+	}
+	err = s.db.QueryRowContext(ctx, `select coalesce(sum(-delta), 0) from credit_ledger
+		where tenant_id = ? and user_id = ? and delta < 0 and reason in ('image_generation', 'llm_planner', 'llm_reply')`, user.TenantID, user.ID).
+		Scan(&summary.CreditsSpent)
 	if err != nil {
 		return UsageSummary{}, err
 	}
@@ -907,7 +944,7 @@ func (s *Store) AdminStats(ctx context.Context, granularity string, window int) 
 	if err := s.db.QueryRowContext(ctx, `select count(*) from tasks`).Scan(&stats.TotalTasks); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `select coalesce(sum(-delta),0) from credit_ledger where delta < 0 and reason in ('image_generation', 'llm_reply')`).Scan(&stats.TotalCredits); err != nil {
+	if err := s.db.QueryRowContext(ctx, `select coalesce(sum(-delta),0) from credit_ledger where delta < 0 and reason in ('image_generation', 'llm_planner', 'llm_reply')`).Scan(&stats.TotalCredits); err != nil {
 		return stats, err
 	}
 
@@ -922,11 +959,11 @@ func (s *Store) AdminStats(ctx context.Context, granularity string, window int) 
 		select %s as bucket,
 			sum(case when reason = 'image_generation' then 1 else 0 end) as tasks,
 			coalesce(sum(-delta), 0) as credits,
-			coalesce(sum(case when reason = 'llm_reply' then -delta else 0 end), 0) as text_credits,
+			coalesce(sum(case when reason in ('llm_planner', 'llm_reply') then -delta else 0 end), 0) as text_credits,
 			coalesce(sum(case when reason = 'image_generation' then -delta else 0 end), 0) as image_credits
 		from credit_ledger
 		where delta < 0
-			and reason in ('image_generation', 'llm_reply')
+			and reason in ('image_generation', 'llm_planner', 'llm_reply')
 			and created_at >= datetime('now', ?)
 		group by bucket
 		order by bucket asc`, bucketExpr), modifier)

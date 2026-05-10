@@ -1,5 +1,5 @@
 import { useAppStore } from '../store/appStore'
-import type { AdminLedgerEntry, AdminStats, Asset, GenerateResponse, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
+import type { AdminLedgerEntry, AdminStats, Asset, GenerateResponse, RuntimeSettings, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
 
 type AuthResponse = {
   token: string
@@ -49,6 +49,7 @@ export const api = {
   deleteSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   getSession: (id: number) => request<SessionDetail>(`/api/sessions/${id}`),
   listAssets: () => request<{ assets: Asset[] | null }>('/api/assets'),
+  runtimeSettings: () => request<{ settings: RuntimeSettings }>('/api/settings'),
   uploadAsset: (sessionId: number, file: File, provider?: string) => {
     const data = new FormData()
     data.append('file', file)
@@ -71,6 +72,9 @@ export const api = {
       prompt?: string
       assistant_message?: string
       use_planner?: boolean
+      planner_provider?: string
+      planner_model?: string
+      image_provider?: string
     },
   ) =>
     request<GenerateResponse>(`/api/sessions/${sessionId}/generate`, {
@@ -87,6 +91,9 @@ export const api = {
       quality: string
       count: number
       use_planner?: boolean
+      planner_provider?: string
+      planner_model?: string
+      image_provider?: string
     },
     onEvent: (event: StreamEvent) => void,
   ) => {
@@ -130,6 +137,9 @@ export const api = {
   adminStats: (granularity: 'hour' | 'day' = 'hour', window = granularity === 'hour' ? 24 : 30) =>
     request<AdminStats>(`/api/admin/stats?granularity=${granularity}&days=${window}`),
   adminLedger: (limit = 200) => request<{ entries: AdminLedgerEntry[] | null }>(`/api/admin/ledger?limit=${limit}`),
+  adminSettings: () => request<{ settings: RuntimeSettings }>('/api/admin/settings'),
+  adminSaveSettings: (settings: RuntimeSettings) =>
+    request<{ settings: RuntimeSettings }>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) }),
 }
 
 function parseSSE(chunk: string): StreamEvent | null {

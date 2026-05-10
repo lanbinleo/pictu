@@ -2079,6 +2079,63 @@ pre {
   font-size: 0.76rem;
 }
 
+.admin-settings-layout {
+  min-height: 0;
+  margin-top: 4px;
+}
+
+.system-settings-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.system-settings-grid h3,
+.provider-list h3 {
+  grid-column: 1 / -1;
+}
+
+.system-settings-grid label,
+.provider-editor label {
+  display: grid;
+  gap: 6px;
+  color: var(--soft);
+  font-size: 0.8rem;
+}
+
+.system-settings-grid input,
+.system-settings-grid select,
+.provider-editor input,
+.provider-editor select {
+  width: 100%;
+}
+
+.provider-list {
+  gap: 14px;
+}
+
+.provider-editor {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.provider-editor:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.toggle-row {
+  align-content: end;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* ── Form helpers ── */
 
 .form-error, .form-success, .inline-error {

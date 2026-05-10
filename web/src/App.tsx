@@ -39,7 +39,7 @@ import {
 } from 'lucide-react'
 import { api } from './lib/api'
 import { useAppStore, type Page } from './store/appStore'
-import type { AdminStats, Asset, GenerateResponse, GenerationPlan, Message, Session, SessionDetail, Task, UsageBucket, UsageResponse, User } from './types/api'
+import type { AdminStats, Asset, GenerateResponse, GenerationPlan, Message, RuntimeSettings, Session, SessionDetail, Task, UsageBucket, UsageResponse, User } from './types/api'
 import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from './i18n'
 
 type PendingRequest = {
@@ -125,6 +125,7 @@ function Workspace() {
   const [toolDraft, setToolDraft] = useState<ToolDraft | null>(null)
   const [leftCollapsed, setLeftCollapsed] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSettings | null>(null)
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -195,6 +196,7 @@ function Workspace() {
 
   useEffect(() => {
     api.me().then((res) => setUser(res.user)).catch(() => clearAuth())
+    api.runtimeSettings().then((res) => setRuntimeSettings(res.settings)).catch(() => undefined)
     refreshSessions().catch((err) => setError(err.message))
   }, [])
 
@@ -333,11 +335,12 @@ function Workspace() {
             setOptimisticMessages={setOptimisticMessages}
             pendingRequest={pendingRequest?.sessionId === activeSessionId ? pendingRequest : null}
             setPendingRequest={setPendingRequest}
+            runtimeSettings={runtimeSettings}
           />
         </section>
       )}
 
-      {page === 'gallery' && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} />}
+      {page === 'gallery' && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} runtimeSettings={runtimeSettings} />}
       {page === 'chats' && <ChatsPage sessions={sessions} onSelect={selectSession} onArchive={archiveSession} onRefresh={refreshSessions} />}
       {page === 'settings' && <SettingsPage />}
       {page === 'admin' && user?.role === 'admin' && <AdminPage />}
@@ -509,7 +512,7 @@ function MessageStream({ messages, tasks, streamingText, thinkingText, toolDraft
 
 // ── Composer ──
 
-function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingText, setStreamingSessionId, setToolDraft, setOptimisticMessages, pendingRequest, setPendingRequest, conversationStarted }: {
+function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingText, setStreamingSessionId, setToolDraft, setOptimisticMessages, pendingRequest, setPendingRequest, conversationStarted, runtimeSettings }: {
   sessionId: number | null; assets: Asset[]; conversationStarted: boolean
   onChanged: () => void | Promise<void>
   setStreamingText: React.Dispatch<React.SetStateAction<string>>
@@ -519,6 +522,7 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
   setOptimisticMessages: React.Dispatch<React.SetStateAction<Record<number, Message[]>>>
   pendingRequest: PendingRequest | null
   setPendingRequest: React.Dispatch<React.SetStateAction<PendingRequest | null>>
+  runtimeSettings: RuntimeSettings | null
 }) {
   const draft = useAppStore((s) => s.draft)
   const setDraft = useAppStore((s) => s.setDraft)
@@ -543,6 +547,9 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
+  const [plannerProvider, setPlannerProvider] = useState('')
+  const [plannerModel, setPlannerModel] = useState('')
+  const [imageProvider, setImageProvider] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
@@ -550,9 +557,19 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
   const selectedAssets = galleryAssets.filter((a) => selectedAssetIds.includes(a.id))
   const composerCentered = !conversationStarted
   const greeting = useMemo(() => buildComposerGreeting(user), [user?.display_name, user?.email])
+  const selectedPlannerProvider = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
+  const selectedPlannerModel = plannerModel || runtimeSettings?.defaults.planner_model || ''
+  const selectedImageProvider = imageProvider || runtimeSettings?.defaults.image_provider || ''
 
   const parsedCommands = useMemo(() => parseCommands(draft), [draft])
   const hasCommandOverrides = Object.keys(parsedCommands.overrides).length > 0
+
+  useEffect(() => {
+    if (!runtimeSettings) return
+    if (!uploadProvider || !runtimeSettings.upload_providers.some((p) => p.id === uploadProvider)) {
+      setUploadProvider(runtimeSettings.defaults.upload_provider)
+    }
+  }, [runtimeSettings?.defaults.upload_provider])
 
   function chooseUploadFiles() {
     setAssetGalleryOpen(false)
@@ -597,7 +614,11 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
         setStreamingSessionId(targetSessionId)
         setToolDraft({ sessionId: targetSessionId, phase: 'calling', prompt: extra.prompt, raw: '' })
       }
-      const res = await api.generate(targetSessionId, { message, asset_ids: assetIds, use_planner: usePlanner, ...baseSettings, ...extra })
+      const res = await api.generate(targetSessionId, {
+        message, asset_ids: assetIds, use_planner: usePlanner,
+        planner_provider: selectedPlannerProvider, planner_model: selectedPlannerModel, image_provider: selectedImageProvider,
+        ...baseSettings, ...extra,
+      })
       if (res.requires_confirmation) {
         setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, settings: baseSettings })
         return
@@ -637,7 +658,11 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
     let completed = false
     let toolUsed = false
     try {
-      await api.generateStream(sessionId, { message: submitted, asset_ids: submittedAssetIds, use_planner: usePlanner, ...submittedSettings }, (event) => {
+      await api.generateStream(sessionId, {
+        message: submitted, asset_ids: submittedAssetIds, use_planner: usePlanner,
+        planner_provider: selectedPlannerProvider, planner_model: selectedPlannerModel, image_provider: selectedImageProvider,
+        ...submittedSettings,
+      }, (event) => {
         if (event.type === 'content') setStreamingText((t) => t + event.text)
         else if (event.type === 'thinking') setThinkingText((t) => t + event.text)
         else if (event.type === 'confirm') {
@@ -755,11 +780,15 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
               <SlidersHorizontal size={18} />
             </button>
             {settingsOpen && (
-              <SettingsPopover settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner} onClose={() => setSettingsOpen(false)} />
+              <SettingsPopover settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner}
+                runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
+                plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel} imageProvider={selectedImageProvider} setImageProvider={setImageProvider}
+                onClose={() => setSettingsOpen(false)} />
             )}
             {assetGalleryOpen && (
               <AssetGalleryPopover
                 assets={galleryAssets} selectedAssetIds={selectedAssetIds} uploadProvider={uploadProvider} setUploadProvider={setUploadProvider}
+                runtimeSettings={runtimeSettings}
                 uploading={uploading} loading={libraryLoading} onUpload={chooseUploadFiles} onUse={useGalleryAsset}
                 onPreview={(a) => setGalleryPreview(assetImageSrc(a))} onClose={() => setAssetGalleryOpen(false)}
               />
@@ -800,11 +829,14 @@ function Composer({ sessionId, assets, onChanged, setStreamingText, setThinkingT
 
 // ── Popovers & Dialogs ──
 
-function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, onClose }: {
+function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, runtimeSettings, plannerProvider, setPlannerProvider, plannerModel, setPlannerModel, imageProvider, setImageProvider, onClose }: {
   settings: GenerationSettingsValue; setSettings: (s: Partial<GenerationSettingsValue>) => void
-  usePlanner: boolean; setUsePlanner: (v: boolean) => void; onClose: () => void
+  usePlanner: boolean; setUsePlanner: (v: boolean) => void; runtimeSettings: RuntimeSettings | null
+  plannerProvider: string; setPlannerProvider: (v: string) => void; plannerModel: string; setPlannerModel: (v: string) => void
+  imageProvider: string; setImageProvider: (v: string) => void; onClose: () => void
 }) {
   const locale = useAppStore((s) => s.locale)
+  const selectedProvider = runtimeSettings?.llm_providers.find((p) => p.id === plannerProvider)
   return (
     <div className="settings-popover" onClick={(e) => e.stopPropagation()}>
       <div className="settings-popover-head">
@@ -816,6 +848,30 @@ function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, onC
         <span>AI Planner</span>
         <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
       </label>
+      {runtimeSettings && (
+        <div className="settings-controls planner-settings-controls">
+          <label>
+            Planner
+            <select value={plannerProvider} onChange={(e) => {
+              const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
+              setPlannerProvider(e.target.value)
+              setPlannerModel(next?.planner_model || '')
+            }}>
+              {runtimeSettings.llm_providers.filter((p) => p.enabled).map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+            </select>
+          </label>
+          <label>
+            Planner model
+            <input value={plannerModel || selectedProvider?.planner_model || ''} onChange={(e) => setPlannerModel(e.target.value)} />
+          </label>
+          <label>
+            图片 provider
+            <select value={imageProvider} onChange={(e) => setImageProvider(e.target.value)}>
+              {runtimeSettings.image_providers.filter((p) => p.enabled).map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
     </div>
   )
 }
@@ -850,9 +906,9 @@ function SettingsControls({ settings, setSettings }: { settings: GenerationSetti
   )
 }
 
-function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, setUploadProvider, uploading, loading, onUpload, onUse, onPreview, onClose }: {
+function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, setUploadProvider, runtimeSettings, uploading, loading, onUpload, onUse, onPreview, onClose }: {
   assets: Asset[]; selectedAssetIds: number[]; uploadProvider: string; setUploadProvider: (p: string) => void
-  uploading: boolean; loading: boolean; onUpload: () => void; onUse: (a: Asset) => void | Promise<void>; onPreview: (a: Asset) => void; onClose: () => void
+  runtimeSettings: RuntimeSettings | null; uploading: boolean; loading: boolean; onUpload: () => void; onUse: (a: Asset) => void | Promise<void>; onPreview: (a: Asset) => void; onClose: () => void
 }) {
   return (
     <div className="asset-gallery-popover" onClick={(e) => e.stopPropagation()}>
@@ -863,8 +919,9 @@ function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, setUplo
       <label className="asset-gallery-provider">
         上传到
         <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
-          <option value="evolink">Evolink</option>
-          <option value="maxqi">MaxQi</option>
+          {(runtimeSettings?.upload_providers.filter((p) => p.enabled) ?? [{ id: 'evolink', name: 'Evolink' }, { id: 'maxqi', name: 'MaxQi' }]).map((p) => (
+            <option key={p.id} value={p.id}>{p.name || p.id}</option>
+          ))}
         </select>
       </label>
       <div className="asset-gallery-grid">
@@ -1130,7 +1187,7 @@ function ChatsPage({ sessions, onSelect, onArchive, onRefresh }: {
   )
 }
 
-function GalleryPage({ activeSessionId, onSessionsChanged }: { activeSessionId: number | null; onSessionsChanged: () => void | Promise<void> }) {
+function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSettings }: { activeSessionId: number | null; onSessionsChanged: () => void | Promise<void>; runtimeSettings: RuntimeSettings | null }) {
   const [data, setData] = useState<UsageResponse | null>(null)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
@@ -1217,8 +1274,9 @@ function GalleryPage({ activeSessionId, onSessionsChanged }: { activeSessionId: 
             <label>
               上传到
               <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
-                <option value="evolink">Evolink</option>
-                <option value="maxqi">MaxQi</option>
+                {(runtimeSettings?.upload_providers.filter((p) => p.enabled) ?? [{ id: 'evolink', name: 'Evolink' }, { id: 'maxqi', name: 'MaxQi' }]).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name || p.id}</option>
+                ))}
               </select>
             </label>
             <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
@@ -1417,13 +1475,15 @@ function SettingsPage() {
 }
 
 function AdminPage() {
-  const [tab, setTab] = useState<'overview' | 'users' | 'ledger'>('overview')
+  const [tab, setTab] = useState<'overview' | 'users' | 'ledger' | 'settings'>('overview')
   const [statsGranularity, setStatsGranularity] = useState<'hour' | 'day'>('hour')
   const [users, setUsers] = useState<User[]>([])
   const [delta, setDelta] = useState<Record<number, string>>({})
   const [error, setError] = useState('')
   const [stats, setStats] = useState<AdminStats | null>(null)
   const [ledger, setLedger] = useState<{ id: number; user_id: number; user_email: string; delta: number; balance: number; reason: string; ref_id: string; created_at: string }[]>([])
+  const [settings, setSettings] = useState<RuntimeSettings | null>(null)
+  const [settingsSaved, setSettingsSaved] = useState(false)
   const locale = useAppStore((s) => s.locale)
 
   async function loadUsers() {
@@ -1439,6 +1499,24 @@ function AdminPage() {
   async function loadLedger() {
     const res = await api.adminLedger(200)
     setLedger(res.entries ?? [])
+  }
+
+  async function loadSettings() {
+    const res = await api.adminSettings()
+    setSettings(res.settings)
+  }
+
+  async function saveSettings(next: RuntimeSettings) {
+    setError('')
+    setSettingsSaved(false)
+    try {
+      const res = await api.adminSaveSettings(next)
+      setSettings(res.settings)
+      setSettingsSaved(true)
+      await loadStats(statsGranularity)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败')
+    }
   }
 
   async function adjust(user: User) {
@@ -1458,6 +1536,7 @@ function AdminPage() {
   useEffect(() => {
     loadUsers().catch((e) => setError(e.message))
     loadLedger().catch((e) => setError(e.message))
+    loadSettings().catch((e) => setError(e.message))
   }, [])
 
   useEffect(() => {
@@ -1478,8 +1557,10 @@ function AdminPage() {
           <button type="button" className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}><BarChart3 size={16} /><span>概览</span></button>
           <button type="button" className={tab === 'users' ? 'active' : ''} onClick={() => setTab('users')}><Users size={16} /><span>用户</span></button>
           <button type="button" className={tab === 'ledger' ? 'active' : ''} onClick={() => setTab('ledger')}><ScrollText size={16} /><span>日志</span></button>
+          <button type="button" className={tab === 'settings' ? 'active' : ''} onClick={() => setTab('settings')}><Settings2 size={16} /><span>系统设置</span></button>
         </nav>
         {error && <p className="form-error">{error}</p>}
+        {settingsSaved && <p className="form-success">设置已保存</p>}
         {tab === 'overview' && stats && (
           <>
             <div className="metric-grid">
@@ -1491,7 +1572,7 @@ function AdminPage() {
             <br></br>
             <section className="panel-block">
               <div className="panel-head">
-                <h3>{statsGranularity === 'hour' ? '近 24 小时消耗' : '近 30 天消耗'}</h3>
+                <h3>{statsGranularity === 'hour' ? '近 24 小时消耗' : '近 30 天有消耗的日期'}</h3>
                 <div className="segmented-control" role="group" aria-label="统计维度">
                   <button type="button" className={statsGranularity === 'hour' ? 'active' : ''} onClick={() => setStatsGranularity('hour')}>小时</button>
                   <button type="button" className={statsGranularity === 'day' ? 'active' : ''} onClick={() => setStatsGranularity('day')}>天</button>
@@ -1505,7 +1586,6 @@ function AdminPage() {
                 {usageBuckets.map((d) => (
                   <UsageBar key={d.period} bucket={d} maxCredits={maxCredits} granularity={statsGranularity} />
                 ))}
-                {usageBuckets.length === 0 && <p className="empty-note">暂无数据</p>}
               </div>
             </section>
           </>
@@ -1538,6 +1618,115 @@ function AdminPage() {
             {ledger.length === 0 && <p className="empty-note">暂无日志</p>}
           </div>
         )}
+
+        {tab === 'settings' && settings && (
+          <AdminSystemSettings settings={settings} onChange={setSettings} onSave={saveSettings} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AdminSystemSettings({ settings, onChange, onSave }: { settings: RuntimeSettings; onChange: (settings: RuntimeSettings) => void; onSave: (settings: RuntimeSettings) => void }) {
+  const [section, setSection] = useState<'basic' | 'llm' | 'upload' | 'billing' | 'image'>('basic')
+  const patch = (next: Partial<RuntimeSettings>) => onChange({ ...settings, ...next })
+  const patchDefaults = (next: Partial<RuntimeSettings['defaults']>) => patch({ defaults: { ...settings.defaults, ...next } })
+  const patchBilling = (next: Partial<RuntimeSettings['billing']>) => patch({ billing: { ...settings.billing, ...next } })
+  const patchLLM = (index: number, next: Partial<RuntimeSettings['llm_providers'][number]>) =>
+    patch({ llm_providers: settings.llm_providers.map((item, i) => (i === index ? { ...item, ...next } : item)) })
+  const patchUpload = (index: number, next: Partial<RuntimeSettings['upload_providers'][number]>) =>
+    patch({ upload_providers: settings.upload_providers.map((item, i) => (i === index ? { ...item, ...next } : item)) })
+  const patchImage = (index: number, next: Partial<RuntimeSettings['image_providers'][number]>) =>
+    patch({ image_providers: settings.image_providers.map((item, i) => (i === index ? { ...item, ...next } : item)) })
+  const numberValue = (value: string) => Number.isFinite(Number(value)) ? Number(value) : 0
+
+  return (
+    <div className="settings-layout admin-settings-layout">
+      <nav className="settings-nav">
+        <button type="button" className={section === 'basic' ? 'active' : ''} onClick={() => setSection('basic')}><Settings2 size={16} /><span>基础设置</span></button>
+        <button type="button" className={section === 'llm' ? 'active' : ''} onClick={() => setSection('llm')}><Sparkles size={16} /><span>LLM providers</span></button>
+        <button type="button" className={section === 'upload' ? 'active' : ''} onClick={() => setSection('upload')}><ImagePlus size={16} /><span>上传 / 图床</span></button>
+        <button type="button" className={section === 'image' ? 'active' : ''} onClick={() => setSection('image')}><Camera size={16} /><span>图片 provider</span></button>
+        <button type="button" className={section === 'billing' ? 'active' : ''} onClick={() => setSection('billing')}><CreditCard size={16} /><span>计费规则</span></button>
+      </nav>
+      <div className="settings-content">
+        {section === 'basic' && (
+          <section className="panel-block system-settings-grid">
+            <h3>默认选择</h3>
+            <label><span>默认 planner provider</span><select value={settings.defaults.planner_provider} onChange={(e) => patchDefaults({ planner_provider: e.target.value })}>{settings.llm_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
+            <label><span>默认 planner model</span><input value={settings.defaults.planner_model} onChange={(e) => patchDefaults({ planner_model: e.target.value })} /></label>
+            <label><span>标题 provider</span><select value={settings.defaults.title_provider} onChange={(e) => patchDefaults({ title_provider: e.target.value })}>{settings.llm_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
+            <label><span>标题 model</span><input value={settings.defaults.title_model} onChange={(e) => patchDefaults({ title_model: e.target.value })} /></label>
+            <label><span>默认上传 provider</span><select value={settings.defaults.upload_provider} onChange={(e) => patchDefaults({ upload_provider: e.target.value })}>{settings.upload_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
+            <label><span>默认图片 provider</span><select value={settings.defaults.image_provider} onChange={(e) => patchDefaults({ image_provider: e.target.value })}>{settings.image_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
+          </section>
+        )}
+        {section === 'llm' && (
+          <section className="panel-block provider-list">
+            <div className="panel-head"><h3>LLM providers</h3><button type="button" className="secondary-button" onClick={() => patch({ llm_providers: [...settings.llm_providers, { id: `llm-${settings.llm_providers.length + 1}`, name: 'New LLM', type: 'openai_compatible', base_url: '', api_key: '', planner_model: '', title_model: '', timeout_seconds: 45, max_context_messages: 12, credit_multiplier: 1, enabled: true }] })}><Plus size={16} />新增</button></div>
+            {settings.llm_providers.map((p, i) => (
+              <div className="provider-editor" key={`${p.id}-${i}`}>
+                <label><span>ID</span><input value={p.id} onChange={(e) => patchLLM(i, { id: e.target.value })} /></label>
+                <label><span>名称</span><input value={p.name} onChange={(e) => patchLLM(i, { name: e.target.value })} /></label>
+                <label><span>类型</span><select value={p.type} onChange={(e) => patchLLM(i, { type: e.target.value })}><option value="builtin">builtin</option><option value="openai_compatible">openai_compatible</option></select></label>
+                <label><span>Base URL</span><input value={p.base_url} onChange={(e) => patchLLM(i, { base_url: e.target.value })} /></label>
+                <label><span>API Key</span><input value={p.api_key} onChange={(e) => patchLLM(i, { api_key: e.target.value })} /></label>
+                <label><span>Planner model</span><input value={p.planner_model} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
+                <label><span>Title model</span><input value={p.title_model} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
+                <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchLLM(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchLLM(i, { enabled: e.target.checked })} /><span>启用</span></label>
+              </div>
+            ))}
+          </section>
+        )}
+        {section === 'upload' && (
+          <section className="panel-block provider-list">
+            <div className="panel-head"><h3>上传 / 图床 providers</h3><button type="button" className="secondary-button" onClick={() => patch({ upload_providers: [...settings.upload_providers, { id: `upload-${settings.upload_providers.length + 1}`, name: 'New Upload', type: 'lsky', base_url: '', token: '', strategy_id: 0, enabled: true }] })}><Plus size={16} />新增</button></div>
+            {settings.upload_providers.map((p, i) => (
+              <div className="provider-editor" key={`${p.id}-${i}`}>
+                <label><span>ID</span><input value={p.id} onChange={(e) => patchUpload(i, { id: e.target.value })} /></label>
+                <label><span>名称</span><input value={p.name} onChange={(e) => patchUpload(i, { name: e.target.value })} /></label>
+                <label><span>类型</span><select value={p.type} onChange={(e) => patchUpload(i, { type: e.target.value })}><option value="evolink">evolink</option><option value="lsky">lsky</option></select></label>
+                <label><span>Base URL</span><input value={p.base_url} onChange={(e) => patchUpload(i, { base_url: e.target.value })} /></label>
+                <label><span>Token</span><input value={p.token} onChange={(e) => patchUpload(i, { token: e.target.value })} /></label>
+                <label><span>Strategy ID</span><input type="number" value={p.strategy_id} onChange={(e) => patchUpload(i, { strategy_id: Math.trunc(numberValue(e.target.value)) })} /></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchUpload(i, { enabled: e.target.checked })} /><span>启用</span></label>
+              </div>
+            ))}
+          </section>
+        )}
+        {section === 'image' && (
+          <section className="panel-block provider-list">
+            <h3>图片 provider</h3>
+            {settings.image_providers.map((p, i) => (
+              <div className="provider-editor" key={`${p.id}-${i}`}>
+                <label><span>ID</span><input value={p.id} onChange={(e) => patchImage(i, { id: e.target.value })} /></label>
+                <label><span>名称</span><input value={p.name} onChange={(e) => patchImage(i, { name: e.target.value })} /></label>
+                <label><span>类型</span><select value={p.type} onChange={(e) => patchImage(i, { type: e.target.value })}><option value="evolink">evolink</option></select></label>
+                <label><span>Model</span><input value={p.model} onChange={(e) => patchImage(i, { model: e.target.value })} /></label>
+                <label><span>Base URL</span><input value={p.base_url} onChange={(e) => patchImage(i, { base_url: e.target.value })} /></label>
+                <label><span>Files Base URL</span><input value={p.files_base_url} onChange={(e) => patchImage(i, { files_base_url: e.target.value })} /></label>
+                <label><span>API Key</span><input value={p.api_key} onChange={(e) => patchImage(i, { api_key: e.target.value })} /></label>
+                <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchImage(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchImage(i, { enabled: e.target.checked })} /><span>启用</span></label>
+              </div>
+            ))}
+          </section>
+        )}
+        {section === 'billing' && (
+          <section className="panel-block system-settings-grid">
+            <h3>计费规则</h3>
+            <label><span>新用户赠送</span><input type="number" value={settings.billing.signup_credits} onChange={(e) => patchBilling({ signup_credits: Math.trunc(numberValue(e.target.value)) })} /></label>
+            <label><span>LLM 基础点数</span><input type="number" value={settings.billing.llm_base_cost} onChange={(e) => patchBilling({ llm_base_cost: Math.trunc(numberValue(e.target.value)) })} /></label>
+            <label><span>图片基础点数</span><input type="number" value={settings.billing.image_base_cost} onChange={(e) => patchBilling({ image_base_cost: Math.trunc(numberValue(e.target.value)) })} /></label>
+            <label><span>参考图点数</span><input type="number" value={settings.billing.image_input_cost} onChange={(e) => patchBilling({ image_input_cost: Math.trunc(numberValue(e.target.value)) })} /></label>
+            <label><span>高质量 multiplier</span><input type="number" step="0.01" value={settings.billing.high_quality_multiplier} onChange={(e) => patchBilling({ high_quality_multiplier: numberValue(e.target.value) })} /></label>
+            <label><span>低质量 multiplier</span><input type="number" step="0.01" value={settings.billing.low_quality_multiplier} onChange={(e) => patchBilling({ low_quality_multiplier: numberValue(e.target.value) })} /></label>
+          </section>
+        )}
+        <div className="settings-actions">
+          <button type="button" className="primary-button" onClick={() => onSave(settings)}><Check size={16} />保存设置</button>
+        </div>
       </div>
     </div>
   )

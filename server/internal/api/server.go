@@ -32,12 +32,12 @@ type Server struct {
 	cfg     config.Config
 	store   *store.Store
 	evolink *evolink.Client
-	planner *Planner
 	router  *gin.Engine
 }
 
 func New(cfg config.Config, st *store.Store, ev *evolink.Client) *Server {
-	s := &Server{cfg: cfg, store: st, evolink: ev, planner: NewPlanner(cfg.LLM)}
+	s := &Server{cfg: cfg, store: st, evolink: ev}
+	_ = s.ensureRuntimeSettings(context.Background())
 	s.router = s.routes()
 	return s
 }
@@ -87,6 +87,7 @@ func (s *Server) routes() *gin.Engine {
 	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
 	protected.DELETE("/sessions/:id", s.deleteSession)
 	protected.GET("/assets", s.listAssets)
+	protected.GET("/settings", s.runtimeOptions)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
 	protected.POST("/sessions/:id/assets/:asset_id/use", s.useAsset)
 	protected.DELETE("/assets/:asset_id", s.deleteAsset)
@@ -101,6 +102,8 @@ func (s *Server) routes() *gin.Engine {
 	admin.POST("/users/:id/credits", s.adminAdjustCredits)
 	admin.GET("/stats", s.adminStats)
 	admin.GET("/ledger", s.adminLedger)
+	admin.GET("/settings", s.adminGetSettings)
+	admin.PUT("/settings", s.adminSaveSettings)
 
 	s.serveFrontend(r)
 	return r
@@ -128,7 +131,12 @@ func (s *Server) register(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	user, err := s.store.CreateUserWithTenant(c, req.Email, hash, req.DisplayName, s.cfg.Billing.SignupCredits)
+	settings, err := s.runtimeSettings(c)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user, err := s.store.CreateUserWithTenant(c, req.Email, hash, req.DisplayName, settings.Billing.SignupCredits)
 	if err != nil {
 		fail(c, http.StatusBadRequest, err.Error())
 		return
@@ -506,11 +514,19 @@ func (s *Server) generate(c *gin.Context) {
 		Prompt           string  `json:"prompt"`
 		AssistantMessage string  `json:"assistant_message"`
 		UsePlanner       *bool   `json:"use_planner"`
+		PlannerProvider  string  `json:"planner_provider"`
+		PlannerModel     string  `json:"planner_model"`
+		ImageProvider    string  `json:"image_provider"`
 	}
 	if !bind(c, &req) {
 		return
 	}
 	user := currentUser(c)
+	settings, err := s.runtimeSettings(c)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
 	assets, err := s.assetsByID(c, user, req.AssetIDs)
 	if err != nil {
 		statusFromErr(c, err)
@@ -539,6 +555,8 @@ func (s *Server) generate(c *gin.Context) {
 	}
 	var plan GenerationPlan
 	usePlanner := req.UsePlanner == nil || *req.UsePlanner
+	plannerCfg, plannerProvider := plannerConfig(settings, req.PlannerProvider, req.PlannerModel)
+	plannerCost := 0
 	if !usePlanner {
 		plan = DirectPlan(input)
 	} else if req.Confirmed && req.Prompt != "" {
@@ -552,19 +570,40 @@ func (s *Server) generate(c *gin.Context) {
 			ToolCalled:       true,
 		}, input)
 	} else {
-		plan, err = s.planner.Plan(c, input)
-		if err != nil {
-			plan = BuildPlan(input)
-		}
-	}
-	if !plan.ToolCalled {
-		if err := s.store.ReserveCredits(c, user, 1, "llm_reply", ""); err != nil {
+		plannerCost = llmCost(settings.Billing.LLMBaseCost, plannerProvider.CreditMultiplier)
+		if err := s.store.ReserveCredits(c, user, plannerCost, "llm_planner", plannerProvider.ref(plannerCfg.PlannerModel)); err != nil {
 			if errors.Is(err, store.ErrInsufficientCredits) {
 				fail(c, http.StatusPaymentRequired, "not enough credits")
 				return
 			}
 			fail(c, http.StatusInternalServerError, err.Error())
 			return
+		}
+		plan, err = NewPlanner(plannerCfg).Plan(c, input)
+		if err != nil {
+			plan = BuildPlan(input)
+		}
+	}
+	if !plan.ToolCalled {
+		if plannerCost == 0 && usePlanner {
+			if err := s.store.ReserveCredits(c, user, llmCost(settings.Billing.LLMBaseCost, plannerProvider.CreditMultiplier), "llm_planner", plannerProvider.ref(plannerCfg.PlannerModel)); err != nil {
+				if errors.Is(err, store.ErrInsufficientCredits) {
+					fail(c, http.StatusPaymentRequired, "not enough credits")
+					return
+				}
+				fail(c, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if !usePlanner {
+			if err := s.store.ReserveCredits(c, user, llmCost(settings.Billing.LLMBaseCost, 1), "llm_reply", "direct"); err != nil {
+				if errors.Is(err, store.ErrInsufficientCredits) {
+					fail(c, http.StatusPaymentRequired, "not enough credits")
+					return
+				}
+				fail(c, http.StatusInternalServerError, err.Error())
+				return
+			}
 		}
 		_, _ = s.store.AddMessage(c, user, sessionID, "user", userMessageContent, "", "")
 		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
@@ -579,7 +618,17 @@ func (s *Server) generate(c *gin.Context) {
 			return
 		}
 	}
-	cost := EstimateCost(s.cfg.Billing.ImageBaseCost, s.cfg.Billing.ImageInputCost, s.cfg.Billing.LowQualityMultiplier, s.cfg.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
+	imageProviderID := req.ImageProvider
+	if imageProviderID == "" {
+		imageProviderID = settings.Defaults.ImageProvider
+	}
+	imageProvider, ok := settings.imageProvider(imageProviderID)
+	if !ok {
+		fail(c, http.StatusBadRequest, "unknown image provider")
+		return
+	}
+	baseCost := EstimateCost(settings.Billing.ImageBaseCost, settings.Billing.ImageInputCost, settings.Billing.LowQualityMultiplier, settings.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
+	cost := multiplyCost(baseCost, imageProvider.CreditMultiplier)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
 		if errors.Is(err, store.ErrInsufficientCredits) {
 			fail(c, http.StatusPaymentRequired, "not enough credits")
@@ -598,7 +647,8 @@ func (s *Server) generate(c *gin.Context) {
 		Quality:    plan.Quality,
 		N:          plan.Count,
 	}
-	task, err := s.evolink.CreateImage(c, evReq)
+	imageClient := evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, imageProvider))
+	task, err := imageClient.CreateImage(c, evReq)
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
 		fail(c, http.StatusBadGateway, err.Error())
@@ -622,18 +672,26 @@ func (s *Server) generateStream(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Message    string  `json:"message" binding:"required"`
-		AssetIDs   []int64 `json:"asset_ids"`
-		Size       string  `json:"size"`
-		Resolution string  `json:"resolution"`
-		Quality    string  `json:"quality"`
-		Count      int     `json:"count"`
-		UsePlanner *bool   `json:"use_planner"`
+		Message         string  `json:"message" binding:"required"`
+		AssetIDs        []int64 `json:"asset_ids"`
+		Size            string  `json:"size"`
+		Resolution      string  `json:"resolution"`
+		Quality         string  `json:"quality"`
+		Count           int     `json:"count"`
+		UsePlanner      *bool   `json:"use_planner"`
+		PlannerProvider string  `json:"planner_provider"`
+		PlannerModel    string  `json:"planner_model"`
+		ImageProvider   string  `json:"image_provider"`
 	}
 	if !bind(c, &req) {
 		return
 	}
 	user := currentUser(c)
+	settings, err := s.runtimeSettings(c)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
 	assets, err := s.assetsByID(c, user, req.AssetIDs)
 	if err != nil {
 		statusFromErr(c, err)
@@ -677,8 +735,14 @@ func (s *Server) generateStream(c *gin.Context) {
 	var streamedToolArgs string
 	usePlanner := req.UsePlanner == nil || *req.UsePlanner
 	var plan GenerationPlan
+	plannerCfg, plannerProvider := plannerConfig(settings, req.PlannerProvider, req.PlannerModel)
 	if usePlanner {
-		plan, err = s.planner.PlanStream(c.Request.Context(), input, func(ev PlanStreamEvent) error {
+		plannerCost := llmCost(settings.Billing.LLMBaseCost, plannerProvider.CreditMultiplier)
+		if err := s.store.ReserveCredits(c, user, plannerCost, "llm_planner", plannerProvider.ref(plannerCfg.PlannerModel)); err != nil {
+			_ = flush("error", gin.H{"error": err.Error()})
+			return
+		}
+		plan, err = NewPlanner(plannerCfg).PlanStream(c.Request.Context(), input, func(ev PlanStreamEvent) error {
 			if ev.Type == "tool" {
 				streamedToolArgs += ev.Text
 				phase := "preparing"
@@ -701,9 +765,11 @@ func (s *Server) generateStream(c *gin.Context) {
 		}
 	}
 	if !plan.ToolCalled {
-		if err := s.store.ReserveCredits(c, user, 1, "llm_reply", ""); err != nil {
-			_ = flush("error", gin.H{"error": err.Error()})
-			return
+		if !usePlanner {
+			if err := s.store.ReserveCredits(c, user, llmCost(settings.Billing.LLMBaseCost, 1), "llm_reply", "direct"); err != nil {
+				_ = flush("error", gin.H{"error": err.Error()})
+				return
+			}
 		}
 		_, _ = s.store.AddMessage(c, user, sessionID, "user", userMessageContent, "", "")
 		msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, "", "")
@@ -716,7 +782,17 @@ func (s *Server) generateStream(c *gin.Context) {
 		_ = flush("confirm", gin.H{"requires_confirmation": true, "plan": plan, "setting_changes": changes})
 		return
 	}
-	cost := EstimateCost(s.cfg.Billing.ImageBaseCost, s.cfg.Billing.ImageInputCost, s.cfg.Billing.LowQualityMultiplier, s.cfg.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
+	imageProviderID := req.ImageProvider
+	if imageProviderID == "" {
+		imageProviderID = settings.Defaults.ImageProvider
+	}
+	imageProvider, ok := settings.imageProvider(imageProviderID)
+	if !ok {
+		_ = flush("error", gin.H{"error": "unknown image provider"})
+		return
+	}
+	baseCost := EstimateCost(settings.Billing.ImageBaseCost, settings.Billing.ImageInputCost, settings.Billing.LowQualityMultiplier, settings.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
+	cost := multiplyCost(baseCost, imageProvider.CreditMultiplier)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
 		_ = flush("error", gin.H{"error": err.Error()})
 		return
@@ -731,7 +807,8 @@ func (s *Server) generateStream(c *gin.Context) {
 		N:          plan.Count,
 	}
 	_ = flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt})
-	task, err := s.evolink.CreateImage(c, evReq)
+	imageClient := evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, imageProvider))
+	task, err := imageClient.CreateImage(c, evReq)
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
 		_ = flush("error", gin.H{"error": err.Error()})
@@ -798,6 +875,24 @@ func (s *Server) adminUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"users": users})
 }
 
+func (s *Server) runtimeOptions(c *gin.Context) {
+	settings, err := s.runtimeSettings(c)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for i := range settings.LLMProviders {
+		settings.LLMProviders[i].APIKey = ""
+	}
+	for i := range settings.UploadProviders {
+		settings.UploadProviders[i].Token = ""
+	}
+	for i := range settings.ImageProviders {
+		settings.ImageProviders[i].APIKey = ""
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": settings})
+}
+
 func (s *Server) adminAdjustCredits(c *gin.Context) {
 	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -857,11 +952,41 @@ func (s *Server) adminLedger(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"entries": entries})
 }
 
+func (s *Server) adminGetSettings(c *gin.Context) {
+	settings, err := s.runtimeSettings(c)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": settings})
+}
+
+func (s *Server) adminSaveSettings(c *gin.Context) {
+	var req struct {
+		Settings RuntimeSettings `json:"settings" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	settings, err := s.saveRuntimeSettings(c, req.Settings)
+	if err != nil {
+		fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": settings})
+}
+
 func (s *Server) pollTask(providerTaskID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Evolink.PollTimeout())
 	defer cancel()
 	ticker := time.NewTicker(s.cfg.Evolink.PollInterval())
 	defer ticker.Stop()
+	client := s.evolink
+	if settings, err := s.runtimeSettings(context.Background()); err == nil {
+		if provider, ok := settings.imageProvider(settings.Defaults.ImageProvider); ok {
+			client = evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, provider))
+		}
+	}
 
 	for {
 		select {
@@ -870,7 +995,7 @@ func (s *Server) pollTask(providerTaskID string) {
 			_ = s.store.RefundTaskCredits(context.Background(), providerTaskID)
 			return
 		case <-ticker.C:
-			task, err := s.evolink.GetTask(ctx, providerTaskID)
+			task, err := client.GetTask(ctx, providerTaskID)
 			if err != nil {
 				continue
 			}
@@ -912,7 +1037,11 @@ func (s *Server) maybeTitleSession(ctx context.Context, user store.User, session
 	if len(previous) > 0 {
 		return
 	}
-	title, err := s.planner.Title(ctx, userText, assistantText, time.Now())
+	settings, err := s.runtimeSettings(ctx)
+	if err != nil {
+		return
+	}
+	title, err := NewPlanner(titleConfig(settings)).Title(ctx, userText, assistantText, time.Now())
 	if err != nil || strings.TrimSpace(title) == "" {
 		return
 	}
@@ -990,7 +1119,10 @@ func promptFromToolArguments(raw string) string {
 func (s *Server) normalizedUploadProvider(provider string) string {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
-		provider = s.cfg.Upload.DefaultProvider
+		settings, err := s.runtimeSettings(context.Background())
+		if err == nil {
+			provider = settings.Defaults.UploadProvider
+		}
 	}
 	return provider
 }
