@@ -11,6 +11,13 @@ This file is the first stop for anyone changing this repo.
 - Do not overwrite unrelated user changes.
 - Prefer small, targeted edits over broad refactors.
 
+## Stack overview
+
+- Backend: Go 1.24, Gin HTTP server, modernc SQLite driver, TOML config.
+- Frontend: Vite, React, TypeScript, Zustand, lucide-react, react-markdown.
+- API routes live in `server/internal/api/server.go`; frontend API calls live in `web/src/lib/api.ts`.
+- The app serves the built frontend from the Go server when configured through `server.frontend_dist`.
+
 ## Read first
 
 Start here before opening the whole tree:
@@ -33,17 +40,33 @@ Start here before opening the whole tree:
 4. Review `git diff` before finishing.
 5. Commit the work once the feature slice is complete.
 
+## Verification
+
+- Backend: run `go test ./...` from `server`.
+- Frontend: run `npm run build` from `web`.
+- For API contract changes, update `web/src/lib/api.ts` and `web/src/types/api.ts` together.
+- For database changes, prefer forward-compatible migrations in `server/internal/store/store.go`.
+
 ## Configuration notes
 
 - `config.toml` and the example TOML files are for startup-only settings.
 - Runtime settings should live in SQLite.
 - If a setting needs to change from the admin panel, it should not depend on a restart.
+- Avoid committing local secrets or machine-specific values from `config.toml`.
 
 ## Frontend notes
 
 - Match the existing UI style in the current app.
 - Reuse existing page shells, panels, tabs, and form controls.
 - Do not add a new visual system unless the user asks for it.
+- Keep text in `web/src/i18n.ts` when it is part of the localized UI.
+- Use lucide-react icons when adding toolbar or action buttons.
+
+## Generated and local files
+
+- Do not edit `web/node_modules`.
+- Do not edit `web/dist` unless the task is specifically about checked-in build output.
+- Treat `pictu.db` and files under `generated/` as local runtime data unless the user says otherwise.
 
 ## Default assumptions
 
