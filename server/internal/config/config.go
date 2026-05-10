@@ -73,6 +73,7 @@ type LLMConfig struct {
 	TitleModel         string `toml:"title_model"`
 	TimeoutSeconds     int    `toml:"timeout_seconds"`
 	MaxContextMessages int    `toml:"max_context_messages"`
+	SupportsVision     bool   `toml:"supports_vision"`
 }
 
 func Load() (Config, error) {

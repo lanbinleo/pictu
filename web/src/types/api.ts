@@ -161,8 +161,15 @@ export type RuntimeLLMProvider = {
   timeout_seconds: number
   max_context_messages: number
   credit_multiplier: number
+  supports_vision: boolean
   allow_user_select: boolean
   enabled: boolean
+}
+
+export type RuntimeLLMModel = {
+  id: string
+  name: string
+  supports_vision: boolean
 }
 
 export type RuntimeUploadProvider = {

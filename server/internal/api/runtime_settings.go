@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"strings"
+	"time"
 
 	"pictu/server/internal/config"
 	"pictu/server/internal/store"
@@ -50,6 +54,7 @@ type RuntimeLLMProvider struct {
 	TimeoutSeconds     int     `json:"timeout_seconds"`
 	MaxContextMessages int     `json:"max_context_messages"`
 	CreditMultiplier   float64 `json:"credit_multiplier"`
+	SupportsVision     bool    `json:"supports_vision"`
 	AllowUserSelect    *bool   `json:"allow_user_select,omitempty"`
 	Enabled            bool    `json:"enabled"`
 }
@@ -75,6 +80,12 @@ type RuntimeImageProvider struct {
 	CreditMultiplier float64 `json:"credit_multiplier"`
 	AllowUserSelect  *bool   `json:"allow_user_select,omitempty"`
 	Enabled          bool    `json:"enabled"`
+}
+
+type RuntimeLLMModel struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	SupportsVision bool   `json:"supports_vision"`
 }
 
 func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
@@ -120,8 +131,23 @@ func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
 			TimeoutSeconds:     timeout,
 			MaxContextMessages: maxContext,
 			CreditMultiplier:   1,
+			SupportsVision:     cfg.LLM.SupportsVision,
 			AllowUserSelect:    boolPtr(true),
 			Enabled:            true,
+		}, {
+			ID:                 "openrouter",
+			Name:               "OpenRouter",
+			Type:               "openai_compatible",
+			BaseURL:            "https://openrouter.ai/api/v1",
+			APIKey:             "",
+			PlannerModel:       "",
+			TitleModel:         "",
+			TimeoutSeconds:     timeout,
+			MaxContextMessages: maxContext,
+			CreditMultiplier:   1,
+			SupportsVision:     true,
+			AllowUserSelect:    boolPtr(true),
+			Enabled:            false,
 		}},
 		ImageProviders: []RuntimeImageProvider{{
 			ID:               "evolink",
@@ -269,6 +295,27 @@ func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 			settings.ImageProviders[i].AllowUserSelect = boolPtr(true)
 		}
 	}
+	hasOpenRouter := false
+	for _, provider := range settings.LLMProviders {
+		if provider.ID == "openrouter" {
+			hasOpenRouter = true
+			break
+		}
+	}
+	if !hasOpenRouter {
+		settings.LLMProviders = append(settings.LLMProviders, RuntimeLLMProvider{
+			ID:                 "openrouter",
+			Name:               "OpenRouter",
+			Type:               "openai_compatible",
+			BaseURL:            "https://openrouter.ai/api/v1",
+			TimeoutSeconds:     45,
+			MaxContextMessages: 12,
+			CreditMultiplier:   1,
+			SupportsVision:     true,
+			AllowUserSelect:    boolPtr(true),
+			Enabled:            false,
+		})
+	}
 	settings.Defaults.PlannerProvider = cleanID(settings.Defaults.PlannerProvider)
 	settings.Defaults.TitleProvider = cleanID(settings.Defaults.TitleProvider)
 	settings.Defaults.UploadProvider = cleanID(settings.Defaults.UploadProvider)
@@ -376,6 +423,7 @@ func plannerConfig(settings RuntimeSettings, providerID, model string) (config.L
 		TitleModel:         provider.TitleModel,
 		TimeoutSeconds:     provider.TimeoutSeconds,
 		MaxContextMessages: provider.MaxContextMessages,
+		SupportsVision:     provider.SupportsVision,
 	}
 	return cfg, provider
 }
@@ -397,6 +445,7 @@ func titleConfig(settings RuntimeSettings) config.LLMConfig {
 		TitleModel:         model,
 		TimeoutSeconds:     provider.TimeoutSeconds,
 		MaxContextMessages: provider.MaxContextMessages,
+		SupportsVision:     false,
 	}
 }
 
@@ -449,4 +498,85 @@ func (provider RuntimeLLMProvider) ref(model string) string {
 		return model
 	}
 	return provider.ID + ":" + model
+}
+
+func (settings RuntimeSettings) providerModels(ctx context.Context, providerID string, fallback RuntimeLLMProvider) ([]RuntimeLLMModel, error) {
+	provider, ok := settings.selectableLLMProvider(providerID)
+	if !ok {
+		provider = fallback
+	}
+	if strings.TrimSpace(provider.BaseURL) == "" || provider.Type != "openai_compatible" {
+		return nil, nil
+	}
+	models, err := fetchLLMModels(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return models, nil
+}
+
+func fetchLLMModels(ctx context.Context, provider RuntimeLLMProvider) ([]RuntimeLLMModel, error) {
+	base := strings.TrimRight(provider.BaseURL, "/")
+	if base == "" {
+		return nil, fmt.Errorf("base url is required")
+	}
+	timeout := provider.TimeoutSeconds
+	if timeout <= 0 {
+		timeout = 30
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if provider.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	}
+	if strings.Contains(strings.ToLower(base), "openrouter.ai") {
+		req.Header.Set("HTTP-Referer", "http://localhost")
+		req.Header.Set("X-Title", "PicTu")
+	}
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("model list error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var raw struct {
+		Data []struct {
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Architecture struct {
+				InputModalities []string `json:"input_modalities"`
+			} `json:"architecture"`
+			Modalities []string `json:"modalities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+	models := make([]RuntimeLLMModel, 0, len(raw.Data))
+	for _, item := range raw.Data {
+		if strings.TrimSpace(item.ID) == "" {
+			continue
+		}
+		model := RuntimeLLMModel{ID: item.ID, Name: item.Name}
+		if model.Name == "" {
+			model.Name = model.ID
+		}
+		for _, modality := range append(item.Architecture.InputModalities, item.Modalities...) {
+			if strings.EqualFold(modality, "image") || strings.EqualFold(modality, "vision") {
+				model.SupportsVision = true
+				break
+			}
+		}
+		models = append(models, model)
+	}
+	return models, nil
 }

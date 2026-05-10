@@ -104,6 +104,7 @@ func (s *Server) routes() *gin.Engine {
 	admin.GET("/ledger", s.adminLedger)
 	admin.GET("/settings", s.adminGetSettings)
 	admin.PUT("/settings", s.adminSaveSettings)
+	admin.POST("/llm-provider-models", s.adminLLMProviderModels)
 
 	s.serveFrontend(r)
 	return r
@@ -547,6 +548,7 @@ func (s *Server) generate(c *gin.Context) {
 	input := PlanInput{
 		UserText:        req.Message,
 		ImageNames:      imageNames,
+		ImageURLs:       plannerReferenceURLs(assets),
 		Size:            req.Size,
 		Resolution:      req.Resolution,
 		Quality:         req.Quality,
@@ -715,6 +717,7 @@ func (s *Server) generateStream(c *gin.Context) {
 	input := PlanInput{
 		UserText:        req.Message,
 		ImageNames:      imageNames,
+		ImageURLs:       plannerReferenceURLs(assets),
 		Size:            req.Size,
 		Resolution:      req.Resolution,
 		Quality:         req.Quality,
@@ -965,6 +968,21 @@ func (s *Server) adminGetSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"settings": settings})
+}
+
+func (s *Server) adminLLMProviderModels(c *gin.Context) {
+	var req struct {
+		Provider RuntimeLLMProvider `json:"provider" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	models, err := fetchLLMModels(c.Request.Context(), req.Provider)
+	if err != nil {
+		fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models})
 }
 
 func (s *Server) adminSaveSettings(c *gin.Context) {
@@ -1227,6 +1245,20 @@ func messageWithReferences(text string, assets []store.Asset) string {
 		return text
 	}
 	return strings.TrimSpace(text) + "\n\n" + strings.Join(refs, " ")
+}
+
+func plannerReferenceURLs(assets []store.Asset) []string {
+	var urls []string
+	for _, asset := range assets {
+		url := strings.TrimSpace(asset.URL)
+		if url == "" {
+			url = strings.TrimSpace(asset.LocalURL)
+		}
+		if strings.HasPrefix(strings.ToLower(url), "http://") || strings.HasPrefix(strings.ToLower(url), "https://") {
+			urls = append(urls, url)
+		}
+	}
+	return urls
 }
 
 func sha256Hex(data []byte) string {

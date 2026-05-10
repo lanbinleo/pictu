@@ -40,7 +40,7 @@ import {
 } from 'lucide-react'
 import { api } from './lib/api'
 import { useAppStore } from './store/appStore'
-import type { AdminStats, Asset, GenerateResponse, GenerationPlan, Message, RuntimeSettings, Session, SessionDetail, Task, UsageBucket, UsageResponse, User } from './types/api'
+import type { AdminStats, Asset, GenerateResponse, GenerationPlan, Message, RuntimeLLMModel, RuntimeSettings, Session, SessionDetail, Task, UsageBucket, UsageResponse, User } from './types/api'
 import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from './i18n'
 
 type PendingRequest = {
@@ -1739,16 +1739,70 @@ function AdminPage() {
 
 function AdminSystemSettings({ settings, onChange, onSave }: { settings: RuntimeSettings; onChange: (settings: RuntimeSettings) => void; onSave: (settings: RuntimeSettings) => void }) {
   const [section, setSection] = useState<'basic' | 'models' | 'llm' | 'upload' | 'billing' | 'image'>('basic')
+  const [modelOptions, setModelOptions] = useState<Record<string, RuntimeLLMModel[]>>({})
+  const [modelLoading, setModelLoading] = useState<Record<string, boolean>>({})
+  const [modelErrors, setModelErrors] = useState<Record<string, string>>({})
   const patch = (next: Partial<RuntimeSettings>) => onChange({ ...settings, ...next })
   const patchDefaults = (next: Partial<RuntimeSettings['defaults']>) => patch({ defaults: { ...settings.defaults, ...next } })
   const patchBilling = (next: Partial<RuntimeSettings['billing']>) => patch({ billing: { ...settings.billing, ...next } })
-  const patchLLM = (index: number, next: Partial<RuntimeSettings['llm_providers'][number]>) =>
+  const patchLLM = (index: number, next: Partial<RuntimeSettings['llm_providers'][number]>) => {
+    if ('id' in next || 'type' in next || 'base_url' in next || 'api_key' in next) {
+      clearModelCache(index)
+    }
     patch({ llm_providers: settings.llm_providers.map((item, i) => (i === index ? { ...item, ...next } : item)) })
+  }
   const patchUpload = (index: number, next: Partial<RuntimeSettings['upload_providers'][number]>) =>
     patch({ upload_providers: settings.upload_providers.map((item, i) => (i === index ? { ...item, ...next } : item)) })
   const patchImage = (index: number, next: Partial<RuntimeSettings['image_providers'][number]>) =>
     patch({ image_providers: settings.image_providers.map((item, i) => (i === index ? { ...item, ...next } : item)) })
   const numberValue = (value: string) => Number.isFinite(Number(value)) ? Number(value) : 0
+  const providerListKey = (index: number) => `llm-models-${index}`
+  const providerListId = (index: number) => `${providerListKey(index)}-list`
+
+  function clearModelCache(index: number) {
+    const key = providerListKey(index)
+    setModelOptions((current) => {
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+    setModelLoading((current) => {
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+    setModelErrors((current) => {
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+  }
+
+  async function loadModels(index: number, force = false) {
+    const provider = settings.llm_providers[index]
+    if (!provider || provider.type !== 'openai_compatible' || !provider.base_url.trim()) return
+    const key = providerListKey(index)
+    if (!force && modelOptions[key]) return
+    setModelLoading((current) => ({ ...current, [key]: true }))
+    setModelErrors((current) => {
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+    try {
+      const res = await api.adminLLMProviderModels(provider)
+      setModelOptions((current) => ({ ...current, [key]: res.models ?? [] }))
+    } catch (err) {
+      setModelErrors((current) => ({ ...current, [key]: err instanceof Error ? err.message : '模型列表加载失败' }))
+    } finally {
+      setModelLoading((current) => ({ ...current, [key]: false }))
+    }
+  }
+
+  const defaultPlannerIndex = settings.llm_providers.findIndex((p) => p.id === settings.defaults.planner_provider)
+  const defaultTitleIndex = settings.llm_providers.findIndex((p) => p.id === settings.defaults.title_provider)
+  const defaultPlannerListId = defaultPlannerIndex >= 0 ? providerListId(defaultPlannerIndex) : ''
+  const defaultTitleListId = defaultTitleIndex >= 0 ? providerListId(defaultTitleIndex) : ''
 
   return (
     <div className="settings-layout admin-settings-layout">
@@ -1765,9 +1819,9 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
           <section className="panel-block system-settings-grid">
             <h3>默认选择</h3>
             <label><span>默认 planner provider</span><select value={settings.defaults.planner_provider} onChange={(e) => patchDefaults({ planner_provider: e.target.value })}>{settings.llm_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
-            <label><span>默认 planner model</span><input value={settings.defaults.planner_model} onChange={(e) => patchDefaults({ planner_model: e.target.value })} /></label>
+            <label><span>默认 planner model</span><input list={defaultPlannerListId || undefined} value={settings.defaults.planner_model} onFocus={() => defaultPlannerIndex >= 0 && loadModels(defaultPlannerIndex)} onChange={(e) => patchDefaults({ planner_model: e.target.value })} /></label>
             <label><span>标题 provider</span><select value={settings.defaults.title_provider} onChange={(e) => patchDefaults({ title_provider: e.target.value })}>{settings.llm_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
-            <label><span>标题 model</span><input value={settings.defaults.title_model} onChange={(e) => patchDefaults({ title_model: e.target.value })} /></label>
+            <label><span>标题 model</span><input list={defaultTitleListId || undefined} value={settings.defaults.title_model} onFocus={() => defaultTitleIndex >= 0 && loadModels(defaultTitleIndex)} onChange={(e) => patchDefaults({ title_model: e.target.value })} /></label>
             <label><span>默认上传 provider</span><select value={settings.defaults.upload_provider} onChange={(e) => patchDefaults({ upload_provider: e.target.value })}>{settings.upload_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
             <label><span>默认图片 provider</span><select value={settings.defaults.image_provider} onChange={(e) => patchDefaults({ image_provider: e.target.value })}>{settings.image_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
           </section>
@@ -1778,18 +1832,21 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
             {settings.llm_providers.map((p, i) => (
               <div className="provider-editor" key={`model-${p.id}-${i}`}>
                 <label><span>名称</span><input value={p.name} onChange={(e) => patchLLM(i, { name: e.target.value })} /></label>
-                <label><span>Planner model</span><input value={p.planner_model} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
-                <label><span>Title model</span><input value={p.title_model} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
+                <label><span>Planner model</span><input list={providerListId(i)} value={p.planner_model} onFocus={() => loadModels(i)} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
+                <label><span>Title model</span><input list={providerListId(i)} value={p.title_model} onFocus={() => loadModels(i)} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
                 <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchLLM(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.allow_user_select} onChange={(e) => patchLLM(i, { allow_user_select: e.target.checked })} /><span>允许用户选择</span></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.supports_vision} onChange={(e) => patchLLM(i, { supports_vision: e.target.checked })} /><span>支持图像输入</span></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchLLM(i, { enabled: e.target.checked })} /><span>启用</span></label>
+                {modelLoading[providerListKey(i)] && <p className="empty-note">正在加载模型列表...</p>}
+                {modelErrors[providerListKey(i)] && <p className="form-error">{modelErrors[providerListKey(i)]}</p>}
               </div>
             ))}
           </section>
         )}
         {section === 'llm' && (
           <section className="panel-block provider-list">
-            <div className="panel-head"><h3>LLM providers</h3><button type="button" className="secondary-button" onClick={() => patch({ llm_providers: [...settings.llm_providers, { id: `llm-${settings.llm_providers.length + 1}`, name: 'New LLM', type: 'openai_compatible', base_url: '', api_key: '', planner_model: '', title_model: '', timeout_seconds: 45, max_context_messages: 12, credit_multiplier: 1, allow_user_select: true, enabled: true }] })}><Plus size={16} />新增</button></div>
+            <div className="panel-head"><h3>LLM providers</h3><div className="panel-actions"><button type="button" className="secondary-button" onClick={() => patch({ llm_providers: [...settings.llm_providers, { id: `llm-${settings.llm_providers.length + 1}`, name: 'New LLM', type: 'openai_compatible', base_url: '', api_key: '', planner_model: '', title_model: '', timeout_seconds: 45, max_context_messages: 12, credit_multiplier: 1, supports_vision: false, allow_user_select: true, enabled: true }] })}><Plus size={16} />新增</button></div></div>
             {settings.llm_providers.map((p, i) => (
               <div className="provider-editor" key={`${p.id}-${i}`}>
                 <label><span>ID</span><input value={p.id} onChange={(e) => patchLLM(i, { id: e.target.value })} /></label>
@@ -1797,15 +1854,27 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
                 <label><span>类型</span><select value={p.type} onChange={(e) => patchLLM(i, { type: e.target.value })}><option value="builtin">builtin</option><option value="openai_compatible">openai_compatible</option></select></label>
                 <label><span>Base URL</span><input value={p.base_url} onChange={(e) => patchLLM(i, { base_url: e.target.value })} /></label>
                 <label><span>API Key</span><input value={p.api_key} onChange={(e) => patchLLM(i, { api_key: e.target.value })} /></label>
-                <label><span>Planner model</span><input value={p.planner_model} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
-                <label><span>Title model</span><input value={p.title_model} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
+                <label><span>Planner model</span><input list={providerListId(i)} value={p.planner_model} onFocus={() => loadModels(i)} onChange={(e) => patchLLM(i, { planner_model: e.target.value })} /></label>
+                <label><span>Title model</span><input list={providerListId(i)} value={p.title_model} onFocus={() => loadModels(i)} onChange={(e) => patchLLM(i, { title_model: e.target.value })} /></label>
                 <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchLLM(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.allow_user_select} onChange={(e) => patchLLM(i, { allow_user_select: e.target.checked })} /><span>允许用户选择</span></label>
+                <label className="toggle-row"><input type="checkbox" checked={p.supports_vision} onChange={(e) => patchLLM(i, { supports_vision: e.target.checked })} /><span>支持图像输入</span></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchLLM(i, { enabled: e.target.checked })} /><span>启用</span></label>
+                {modelLoading[providerListKey(i)] && <p className="empty-note">正在加载模型列表...</p>}
+                {modelErrors[providerListKey(i)] && <p className="form-error">{modelErrors[providerListKey(i)]}</p>}
               </div>
             ))}
           </section>
         )}
+        <div style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden' }}>
+          {settings.llm_providers.map((provider, index) => (
+            <datalist key={provider.id || index} id={providerListId(index)}>
+              {(modelOptions[providerListKey(index)] ?? []).map((model) => (
+                <option key={model.id} value={model.id}>{model.name}</option>
+              ))}
+            </datalist>
+          ))}
+        </div>
         {section === 'upload' && (
           <section className="panel-block provider-list">
             <div className="panel-head"><h3>上传 / 图床 providers</h3><button type="button" className="secondary-button" onClick={() => patch({ upload_providers: [...settings.upload_providers, { id: `upload-${settings.upload_providers.length + 1}`, name: 'New Upload', type: 'lsky', base_url: '', token: '', strategy_id: 0, enabled: true }] })}><Plus size={16} />新增</button></div>

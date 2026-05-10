@@ -1932,6 +1932,12 @@ pre {
   gap: 14px;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .segmented-control {
   display: inline-flex;
   gap: 2px;

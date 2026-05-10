@@ -18,6 +18,7 @@ import (
 type PlanInput struct {
 	UserText        string
 	ImageNames      []string
+	ImageURLs       []string
 	Size            string
 	Resolution      string
 	Quality         string
@@ -42,9 +43,20 @@ type Planner struct {
 
 type chatMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    any        `json:"content,omitempty"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type chatContentPart struct {
+	Type     string            `json:"type"`
+	Text     string            `json:"text,omitempty"`
+	ImageURL *chatImageURLPart `json:"image_url,omitempty"`
+}
+
+type chatImageURLPart struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type toolCall struct {
@@ -105,7 +117,7 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 	}
 
 	messages := []chatMessage{
-		{Role: "system", Content: plannerSystemPrompt()},
+		{Role: "system", Content: plannerSystemPrompt(p.cfg.SupportsVision)},
 	}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
@@ -114,7 +126,7 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 		}
 		messages = append(messages, chatMessage{Role: msg.Role, Content: content})
 	}
-	messages = append(messages, chatMessage{Role: "user", Content: userPlanningPrompt(input)})
+	messages = append(messages, chatMessage{Role: "user", Content: userPlanningContent(input, p.cfg.SupportsVision)})
 
 	var out chatResponse
 	if err := p.doChat(ctx, chatRequest{
@@ -143,7 +155,7 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 		return plan, nil
 	}
 
-	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt()}}
+	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt(p.cfg.SupportsVision)}}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
 		if msg.Prompt != "" {
@@ -151,7 +163,7 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 		}
 		messages = append(messages, chatMessage{Role: msg.Role, Content: content})
 	}
-	messages = append(messages, chatMessage{Role: "user", Content: userPlanningPrompt(input)})
+	messages = append(messages, chatMessage{Role: "user", Content: userPlanningContent(input, p.cfg.SupportsVision)})
 
 	reqBody := chatRequest{
 		Model:       p.cfg.PlannerModel,
@@ -184,7 +196,7 @@ func (p *Planner) Title(ctx context.Context, userText, assistantText string, dat
 	if len(out.Choices) == 0 {
 		return fallback, nil
 	}
-	title := strings.TrimSpace(out.Choices[0].Message.Content)
+	title := strings.TrimSpace(messageText(out.Choices[0].Message.Content))
 	title = strings.Trim(title, "\"'“”")
 	if title == "" {
 		return fallback, nil
@@ -208,6 +220,10 @@ func (p *Planner) doChat(ctx context.Context, reqBody chatRequest, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	if strings.Contains(strings.ToLower(p.cfg.BaseURL), "openrouter.ai") {
+		req.Header.Set("HTTP-Referer", "http://localhost")
+		req.Header.Set("X-Title", "PicTu")
+	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -236,6 +252,10 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	if strings.Contains(strings.ToLower(p.cfg.BaseURL), "openrouter.ai") {
+		req.Header.Set("HTTP-Referer", "http://localhost")
+		req.Header.Set("X-Title", "PicTu")
+	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return chatMessage{}, err
@@ -296,7 +316,7 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 				}
 			}
 			if choice.Delta.Content != "" {
-				message.Content += choice.Delta.Content
+				message.Content = appendChatMessageContent(message.Content, choice.Delta.Content)
 				if err := emit(PlanStreamEvent{Type: "content", Text: choice.Delta.Content}); err != nil {
 					return message, err
 				}
@@ -344,7 +364,7 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 
 func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
 	plan := GenerationPlan{
-		AssistantMessage: strings.TrimSpace(msg.Content),
+		AssistantMessage: strings.TrimSpace(messageText(msg.Content)),
 		Size:             input.Size,
 		Resolution:       input.Resolution,
 		Quality:          input.Quality,
@@ -373,7 +393,7 @@ func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
 		if args.Count > 0 {
 			plan.Count = args.Count
 		}
-		plan.AssistantMessage = mergeAssistantMessage(msg.Content, args.AssistantMessage)
+		plan.AssistantMessage = mergeAssistantMessage(messageText(msg.Content), args.AssistantMessage)
 		break
 	}
 	if !plan.ToolCalled {
@@ -498,18 +518,22 @@ func sanitizePlan(plan GenerationPlan, input PlanInput) GenerationPlan {
 	return plan
 }
 
-func plannerSystemPrompt() string {
-	return `You are PicTu's planning model. You are a conversational image design partner and a tool-using agent.
-
-Important:
-- You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.
-- Continue the conversation if the user's idea is underspecified.
+func plannerSystemPrompt(canSeeImages bool) string {
+	var b strings.Builder
+	b.WriteString("You are PicTu's planning model. You are a conversational image design partner and a tool-using agent.\n\nImportant:\n")
+	if canSeeImages {
+		b.WriteString("- Reference images may be attached. You can inspect them directly and should use their visual content, order, and relationships when relevant.\n")
+	} else {
+		b.WriteString("- You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.\n")
+	}
+	b.WriteString(`- Continue the conversation if the user's idea is underspecified.
 - Call generate_image only when the user is ready to create or edit an image.
 - CURRENT SETTINGS are a reference baseline, not a hard rule. You may keep them or deliberately adjust them when the user's creative goal implies a better setup, such as changing landscape to portrait, increasing quality, or changing count.
 - When calling generate_image, you must fill every tool argument: prompt, size, resolution, quality, count, and assistant_message. If you keep a current setting, repeat its value explicitly.
 - If your tool arguments differ from CURRENT SETTINGS, the UI will ask the user to confirm before generating.
 - Write the generation prompt clearly and completely. The user will see it.
-- Keep assistant_message concise and natural.`
+- Keep assistant_message concise and natural.`)
+	return b.String()
 }
 
 func userPlanningPrompt(input PlanInput) string {
@@ -530,6 +554,26 @@ func userPlanningPrompt(input PlanInput) string {
 	b.WriteString("USER MESSAGE:\n")
 	b.WriteString(input.UserText)
 	return b.String()
+}
+
+func userPlanningContent(input PlanInput, supportsVision bool) any {
+	if !supportsVision || len(input.ImageURLs) == 0 {
+		return userPlanningPrompt(input)
+	}
+	content := []chatContentPart{{Type: "text", Text: userPlanningPrompt(input)}}
+	for _, url := range input.ImageURLs {
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		content = append(content, chatContentPart{
+			Type: "image_url",
+			ImageURL: &chatImageURLPart{
+				URL:    url,
+				Detail: "auto",
+			},
+		})
+	}
+	return content
 }
 
 func generateImageTool() toolDef {
@@ -581,6 +625,27 @@ func trimContext(messages []store.Message, max int) []store.Message {
 		return messages
 	}
 	return messages[len(messages)-max:]
+}
+
+func appendChatMessageContent(current any, next string) any {
+	if next == "" {
+		return current
+	}
+	switch value := current.(type) {
+	case string:
+		return value + next
+	case nil:
+		return next
+	default:
+		return next
+	}
+}
+
+func messageText(content any) string {
+	if text, ok := content.(string); ok {
+		return text
+	}
+	return ""
 }
 
 func coalesce(value, fallback string) string {
