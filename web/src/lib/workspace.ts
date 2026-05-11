@@ -137,7 +137,10 @@ export function imageTileShape(width: number, height: number) {
 
 export function imageTileAspectRatio(width: number, height: number) {
   if (!width || !height) return '1 / 1'
-  return `${width} / ${height}`
+  const shape = imageTileShape(width, height)
+  if (shape === 'landscape') return '2 / 1'
+  if (shape === 'portrait') return '1 / 2'
+  return '1 / 1'
 }
 
 export function normalizeGenerationSettings(settings: GenerationSettingsValue): GenerationSettingsValue {

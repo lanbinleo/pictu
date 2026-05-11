@@ -2151,9 +2151,12 @@ pre {
   overflow-x: hidden;
   overscroll-behavior: contain;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  grid-auto-flow: row;
+  grid-auto-rows: auto;
   gap: 12px;
   align-content: start;
+  align-items: start;
   padding-right: 6px;
 }
 
@@ -2168,6 +2171,8 @@ pre {
 }
 
 .gallery-tile {
+  display: block;
+  width: 100%;
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -2177,8 +2182,8 @@ pre {
 }
 
 .asset-tile.shape-square { aspect-ratio: 1 / 1; }
-.asset-tile.shape-portrait { aspect-ratio: 1 / 1.6; }
-.asset-tile.shape-landscape { aspect-ratio: 1.6 / 1; }
+.asset-tile.shape-portrait { aspect-ratio: 1 / 2; }
+.asset-tile.shape-landscape { aspect-ratio: 2 / 1; }
 
 /* ── Canvas page ── */
 
@@ -2484,8 +2489,10 @@ pre {
 
 .gallery-tile img {
   width: 100%;
+  height: 100%;
   display: block;
   object-fit: cover;
+  object-position: center;
   background: transparent;
   border-radius: 10px;
 }
