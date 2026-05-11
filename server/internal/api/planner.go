@@ -117,7 +117,7 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 	}
 
 	messages := []chatMessage{
-		{Role: "system", Content: plannerSystemPrompt(p.cfg.SupportsVision)},
+		{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision)},
 	}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
@@ -155,7 +155,7 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 		return plan, nil
 	}
 
-	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt(p.cfg.SupportsVision)}}
+	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision)}}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
 		if msg.Prompt != "" {
@@ -418,7 +418,7 @@ func mergeAssistantMessage(content, toolMessage string) string {
 func BuildPlan(input PlanInput) GenerationPlan {
 	input = normalizeInput(input)
 	var b strings.Builder
-	b.WriteString("Create a high-quality image result from the user's instruction.\n")
+	b.WriteString("Generate an image prompt as a clear visual brief.\n")
 	if len(input.ImageNames) > 0 {
 		b.WriteString("Reference images are provided in order: ")
 		b.WriteString(strings.Join(input.ImageNames, ", "))
@@ -426,7 +426,7 @@ func BuildPlan(input PlanInput) GenerationPlan {
 	}
 	b.WriteString("User instruction: ")
 	b.WriteString(strings.TrimSpace(input.UserText))
-	b.WriteString("\nOutput requirements: clean composition, natural details, no watermark, no unreadable text unless requested, production-ready image.")
+	b.WriteString("\nOutput requirements: respect the user's requested subject, action, style, composition, text, and restrictions. Use clear scene, lighting, material, camera, and use-case details when they are implied. Avoid watermark, random extra text, clutter, and unrelated objects.")
 	return GenerationPlan{
 		Prompt:           strings.TrimSpace(b.String()),
 		Size:             input.Size,
@@ -519,21 +519,55 @@ func sanitizePlan(plan GenerationPlan, input PlanInput) GenerationPlan {
 	return plan
 }
 
-func plannerSystemPrompt(canSeeImages bool) string {
+func defaultPlannerSystemPrompt() string {
 	var b strings.Builder
-	b.WriteString("You are PicTu's planning model. You are a conversational image design partner and a tool-using agent.\n\nImportant:\n")
+	b.WriteString(`You are PicTu's Planner. Your job is to turn the user's message into a strong image generation or image editing brief, then call generate_image when the user is ready.
+
+Core behavior:
+- Follow the user's instructions carefully. Preserve requested subjects, actions, style, composition, text, exclusions, and reference-image relationships.
+- Treat the final prompt as a brief for a visual designer, photographer, illustrator, or retoucher. Do not write a vague keyword list.
+- If the user is still exploring, asks a question, or leaves the actual image request too unclear, continue the conversation without calling generate_image.
+- If the user asks to create, draw, generate, edit, redesign, restyle, replace, add, remove, or modify an image, call generate_image.
+- Use explicit task verbs in the final prompt: Generate, Draw, Create, Edit, Replace, Remove, Add, Restyle, or similar.
+- For reference images, describe what each image is used for by order. Say what must be preserved and what must change.
+- For multi-image edits, avoid vague combine/merge language. Use concrete instructions such as "Edit image 1 by adding the subject from image 2..."
+- If there is text in the image, quote the exact text and state its approximate position and visual treatment. Also avoid adding text when none was requested.
+- Do not invent brand names, logos, identities, faces, UI copy, labels, or copyrighted characters unless the user requested them or they are visible in a reference image.
+- Keep safety-neutral visual details rich: subject, action/state, environment, time of day, lighting, material, mood, composition, lens/camera angle, color palette, and intended use.
+
+Final prompt shape:
+Generate/Edit [image type] of [subject] [action/state],
+in [scene/environment], with [composition/camera/viewpoint],
+using [style/medium/material/lighting/color].
+Must include: [required elements].
+Preserve: [reference elements that must stay].
+Avoid: [unwanted elements].
+Text, if any: [exact text, placement, font feeling].
+Use case: [poster/product image/avatar/UI asset/book illustration/etc.].
+
+Tool and parameter rules:
+- CURRENT SETTINGS are a reference baseline, not a hard rule. Keep them unless the user's creative goal benefits from a better size, resolution, quality, or count.
+- When calling generate_image, fill every tool argument: prompt, size, resolution, quality, count, and assistant_message. If you keep a current setting, repeat its value explicitly.
+- If tool arguments differ from CURRENT SETTINGS, the UI will ask the user to confirm before generating.
+- Put size, resolution, quality, output count, file format, compression, and background mode in tool parameters when parameters exist. Do not rely on the prompt for those.
+- The prompt should be complete enough that the image model can act without reading the conversation.
+- assistant_message should be brief, natural, and in the user's language. Mention notable parameter changes only when useful.`)
+	return b.String()
+}
+
+func plannerSystemPrompt(customPrompt string, canSeeImages bool) string {
+	base := strings.TrimSpace(customPrompt)
+	if base == "" {
+		base = defaultPlannerSystemPrompt()
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n\nRuntime capability:\n")
 	if canSeeImages {
 		b.WriteString("- Reference images may be attached. You can inspect them directly and should use their visual content, order, and relationships when relevant.\n")
 	} else {
 		b.WriteString("- You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.\n")
 	}
-	b.WriteString(`- Continue the conversation if the user's idea is underspecified.
-- Call generate_image only when the user is ready to create or edit an image.
-- CURRENT SETTINGS are a reference baseline, not a hard rule. You may keep them or deliberately adjust them when the user's creative goal implies a better setup, such as changing landscape to portrait, increasing quality, or changing count.
-- When calling generate_image, you must fill every tool argument: prompt, size, resolution, quality, count, and assistant_message. If you keep a current setting, repeat its value explicitly.
-- If your tool arguments differ from CURRENT SETTINGS, the UI will ask the user to confirm before generating.
-- Write the generation prompt clearly and completely. The user will see it.
-- Keep assistant_message concise and natural.`)
 	return b.String()
 }
 

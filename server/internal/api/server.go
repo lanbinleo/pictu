@@ -936,6 +936,7 @@ func (s *Server) runtimeOptions(c *gin.Context) {
 	for i := range settings.ImageProviders {
 		settings.ImageProviders[i].APIKey = ""
 	}
+	settings.Prompts = RuntimePrompts{}
 	c.JSON(http.StatusOK, gin.H{"settings": settings})
 }
 

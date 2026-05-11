@@ -65,15 +65,16 @@ type EvolinkConfig struct {
 }
 
 type LLMConfig struct {
-	Provider           string `toml:"provider"`
-	BaseURL            string `toml:"base_url"`
-	APIKey             string `toml:"api_key"`
-	Model              string `toml:"model"`
-	PlannerModel       string `toml:"planner_model"`
-	TitleModel         string `toml:"title_model"`
-	TimeoutSeconds     int    `toml:"timeout_seconds"`
-	MaxContextMessages int    `toml:"max_context_messages"`
-	SupportsVision     bool   `toml:"supports_vision"`
+	Provider            string `toml:"provider"`
+	BaseURL             string `toml:"base_url"`
+	APIKey              string `toml:"api_key"`
+	Model               string `toml:"model"`
+	PlannerModel        string `toml:"planner_model"`
+	PlannerSystemPrompt string `toml:"planner_system_prompt"`
+	TitleModel          string `toml:"title_model"`
+	TimeoutSeconds      int    `toml:"timeout_seconds"`
+	MaxContextMessages  int    `toml:"max_context_messages"`
+	SupportsVision      bool   `toml:"supports_vision"`
 }
 
 func Load() (Config, error) {

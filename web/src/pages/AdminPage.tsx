@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, Camera, Check, CreditCard, ImagePlus, Plus, ScrollText, Settings2, Sparkles, Users } from 'lucide-react'
+import { BarChart3, Camera, Check, CreditCard, FileText, ImagePlus, Plus, ScrollText, Settings2, Sparkles, Users } from 'lucide-react'
 import { api } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import type { AdminStats, RuntimeLLMModel, RuntimeSettings, User } from '../types/api'
@@ -160,12 +160,13 @@ export function AdminPage() {
 }
 
 function AdminSystemSettings({ settings, onChange, onSave }: { settings: RuntimeSettings; onChange: (settings: RuntimeSettings) => void; onSave: (settings: RuntimeSettings) => void }) {
-  const [section, setSection] = useState<'basic' | 'models' | 'llm' | 'upload' | 'billing' | 'image'>('basic')
+  const [section, setSection] = useState<'basic' | 'prompts' | 'models' | 'llm' | 'upload' | 'billing' | 'image'>('basic')
   const [modelOptions, setModelOptions] = useState<Record<string, RuntimeLLMModel[]>>({})
   const [modelLoading, setModelLoading] = useState<Record<string, boolean>>({})
   const [modelErrors, setModelErrors] = useState<Record<string, string>>({})
   const patch = (next: Partial<RuntimeSettings>) => onChange({ ...settings, ...next })
   const patchDefaults = (next: Partial<RuntimeSettings['defaults']>) => patch({ defaults: { ...settings.defaults, ...next } })
+  const patchPrompts = (next: Partial<RuntimeSettings['prompts']>) => patch({ prompts: { ...settings.prompts, ...next } })
   const patchBilling = (next: Partial<RuntimeSettings['billing']>) => patch({ billing: { ...settings.billing, ...next } })
   const patchLLM = (index: number, next: Partial<RuntimeSettings['llm_providers'][number]>) => {
     if ('id' in next || 'type' in next || 'base_url' in next || 'api_key' in next) {
@@ -231,6 +232,7 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
     <div className="settings-layout admin-settings-layout">
       <nav className="settings-nav">
         <button type="button" className={section === 'basic' ? 'active' : ''} onClick={() => setSection('basic')}><Settings2 size={16} /><span>基础设置</span></button>
+        <button type="button" className={section === 'prompts' ? 'active' : ''} onClick={() => setSection('prompts')}><FileText size={16} /><span>Planner 提示词</span></button>
         <button type="button" className={section === 'models' ? 'active' : ''} onClick={() => setSection('models')}><Sparkles size={16} /><span>模型管理</span></button>
         <button type="button" className={section === 'llm' ? 'active' : ''} onClick={() => setSection('llm')}><Sparkles size={16} /><span>LLM providers</span></button>
         <button type="button" className={section === 'upload' ? 'active' : ''} onClick={() => setSection('upload')}><ImagePlus size={16} /><span>上传 / 图床</span></button>
@@ -247,6 +249,18 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
             <label><span>标题 model</span><input list={defaultTitleListId || undefined} value={settings.defaults.title_model} onFocus={() => defaultTitleIndex >= 0 && loadModels(defaultTitleIndex)} onChange={(e) => patchDefaults({ title_model: e.target.value })} /></label>
             <label><span>默认上传 provider</span><select value={settings.defaults.upload_provider} onChange={(e) => patchDefaults({ upload_provider: e.target.value })}>{settings.upload_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
             <label><span>默认图片 provider</span><select value={settings.defaults.image_provider} onChange={(e) => patchDefaults({ image_provider: e.target.value })}>{settings.image_providers.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}</select></label>
+          </section>
+        )}
+        {section === 'prompts' && (
+          <section className="panel-block provider-list">
+            <h3>Planner system prompt</h3>
+            <p className="empty-note">这里影响所有用户的 AI Planner。工具参数、参数确认和生成调用仍由后端处理。</p>
+            <textarea
+              value={settings.prompts?.planner_system_prompt ?? ''}
+              onChange={(e) => patchPrompts({ planner_system_prompt: e.target.value })}
+              spellCheck={false}
+              style={{ minHeight: 520, resize: 'vertical', fontFamily: 'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace', lineHeight: 1.55 }}
+            />
           </section>
         )}
         {section === 'models' && (

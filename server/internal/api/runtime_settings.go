@@ -21,6 +21,7 @@ const runtimeSettingsKey = "runtime"
 type RuntimeSettings struct {
 	Billing         RuntimeBilling          `json:"billing"`
 	Defaults        RuntimeDefaults         `json:"defaults"`
+	Prompts         RuntimePrompts          `json:"prompts,omitempty"`
 	LLMProviders    []RuntimeLLMProvider    `json:"llm_providers"`
 	UploadProviders []RuntimeUploadProvider `json:"upload_providers"`
 	ImageProviders  []RuntimeImageProvider  `json:"image_providers"`
@@ -42,6 +43,10 @@ type RuntimeDefaults struct {
 	TitleModel      string `json:"title_model"`
 	UploadProvider  string `json:"upload_provider"`
 	ImageProvider   string `json:"image_provider"`
+}
+
+type RuntimePrompts struct {
+	PlannerSystemPrompt string `json:"planner_system_prompt"`
 }
 
 type RuntimeLLMProvider struct {
@@ -122,6 +127,9 @@ func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
 			TitleModel:      cfg.LLM.TitleModel,
 			UploadProvider:  cfg.Upload.DefaultProvider,
 			ImageProvider:   "evolink",
+		},
+		Prompts: RuntimePrompts{
+			PlannerSystemPrompt: cfg.LLM.PlannerSystemPrompt,
 		},
 		LLMProviders: []RuntimeLLMProvider{{
 			ID:                 llmID,
@@ -247,6 +255,9 @@ func (s *Server) saveRuntimeSettings(ctx context.Context, settings RuntimeSettin
 }
 
 func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
+	if strings.TrimSpace(settings.Prompts.PlannerSystemPrompt) == "" {
+		settings.Prompts.PlannerSystemPrompt = defaultPlannerSystemPrompt()
+	}
 	if settings.Billing.SignupCredits < 0 {
 		settings.Billing.SignupCredits = 0
 	}
@@ -493,14 +504,15 @@ func plannerConfig(settings RuntimeSettings, providerID, model string) (config.L
 		model = provider.PlannerModel
 	}
 	cfg := config.LLMConfig{
-		Provider:           provider.Type,
-		BaseURL:            provider.BaseURL,
-		APIKey:             provider.APIKey,
-		PlannerModel:       model,
-		TitleModel:         provider.TitleModel,
-		TimeoutSeconds:     provider.TimeoutSeconds,
-		MaxContextMessages: provider.MaxContextMessages,
-		SupportsVision:     provider.SupportsVision,
+		Provider:            provider.Type,
+		BaseURL:             provider.BaseURL,
+		APIKey:              provider.APIKey,
+		PlannerModel:        model,
+		PlannerSystemPrompt: settings.Prompts.PlannerSystemPrompt,
+		TitleModel:          provider.TitleModel,
+		TimeoutSeconds:      provider.TimeoutSeconds,
+		MaxContextMessages:  provider.MaxContextMessages,
+		SupportsVision:      provider.SupportsVision,
 	}
 	return cfg, provider
 }

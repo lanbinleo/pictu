@@ -154,6 +154,10 @@ export type RuntimeDefaults = {
   image_provider: string
 }
 
+export type RuntimePrompts = {
+  planner_system_prompt: string
+}
+
 export type RuntimeLLMProvider = {
   id: string
   name: string
@@ -203,6 +207,7 @@ export type RuntimeImageProvider = {
 export type RuntimeSettings = {
   billing: RuntimeBilling
   defaults: RuntimeDefaults
+  prompts: RuntimePrompts
   llm_providers: RuntimeLLMProvider[]
   upload_providers: RuntimeUploadProvider[]
   image_providers: RuntimeImageProvider[]
