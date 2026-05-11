@@ -713,6 +713,7 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
   const [error, setError] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [assetGalleryOpen, setAssetGalleryOpen] = useState(false)
+  const [imageProviderOpen, setImageProviderOpen] = useState(false)
   const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
@@ -731,6 +732,7 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
   const selectedPlannerProvider = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
   const selectedPlannerModel = plannerModel || runtimeSettings?.defaults.planner_model || ''
   const selectedImageProvider = imageProvider || runtimeSettings?.defaults.image_provider || ''
+  const selectedImageProviderLabel = runtimeSettings?.image_providers.find((p) => p.id === selectedImageProvider)?.name || selectedImageProvider
 
   const parsedCommands = useMemo(() => parseCommands(draft), [draft])
   const hasCommandOverrides = Object.keys(parsedCommands.overrides).length > 0
@@ -763,7 +765,20 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
   function openAssetGallery() {
     setAssetGalleryOpen((o) => !o)
     setSettingsOpen(false)
+    setImageProviderOpen(false)
     if (!assetGalleryOpen) loadAssetGallery()
+  }
+
+  function openSettings() {
+    setSettingsOpen((o) => !o)
+    setAssetGalleryOpen(false)
+    setImageProviderOpen(false)
+  }
+
+  function openImageProviderMenu() {
+    setImageProviderOpen((o) => !o)
+    setSettingsOpen(false)
+    setAssetGalleryOpen(false)
   }
 
   useEffect(() => {
@@ -774,16 +789,18 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
   }, [draft])
 
   useEffect(() => {
-    if (!settingsOpen && !assetGalleryOpen) return
+    if (!settingsOpen && !assetGalleryOpen && !imageProviderOpen) return
+    if (galleryPreview) return
     function handleClick(event: MouseEvent) {
       if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
         setSettingsOpen(false)
         setAssetGalleryOpen(false)
+        setImageProviderOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [settingsOpen, assetGalleryOpen])
+  }, [settingsOpen, assetGalleryOpen, imageProviderOpen, galleryPreview])
 
   async function ensureTargetSession() {
     if (sessionId) return sessionId
@@ -1018,13 +1035,13 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
             <button type="button" className="icon-button" onClick={openAssetGallery} title="参考图库">
               {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
             </button>
-            <button type="button" className="icon-button" onClick={() => { setSettingsOpen((o) => !o); setAssetGalleryOpen(false) }} title="生成参数">
+            <button type="button" className="icon-button" onClick={openSettings} title="生成参数">
               <SlidersHorizontal size={18} />
             </button>
             {settingsOpen && (
-              <SettingsPopover settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner}
+              <SettingsPopover settings={settings} setSettings={setSettings}
                 runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
-                plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel} imageProvider={selectedImageProvider} setImageProvider={setImageProvider}
+                plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel}
                 onClose={() => setSettingsOpen(false)} />
             )}
             {assetGalleryOpen && (
@@ -1039,6 +1056,22 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
               <span>Planner</span>
               <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
             </label>
+            <button
+              type="button"
+              className="icon-button provider-menu-button"
+              onClick={openImageProviderMenu}
+              title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}
+            >
+              <Camera size={18} />
+            </button>
+            {imageProviderOpen && (
+              <ImageProviderPopover
+                runtimeSettings={runtimeSettings}
+                value={selectedImageProvider}
+                onSelect={(value) => { setImageProvider(value); setImageProviderOpen(false) }}
+                onClose={() => setImageProviderOpen(false)}
+              />
+            )}
             <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数"><Settings2 size={18} /></button>
             <button className="send-button" disabled={busy || !draft.trim()} title="发送">
               {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
@@ -1072,11 +1105,11 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
 
 // ── Popovers & Dialogs ──
 
-function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, runtimeSettings, plannerProvider, setPlannerProvider, plannerModel, setPlannerModel, imageProvider, setImageProvider, onClose }: {
+function SettingsPopover({ settings, setSettings, runtimeSettings, plannerProvider, setPlannerProvider, plannerModel, setPlannerModel, onClose }: {
   settings: GenerationSettingsValue; setSettings: (s: Partial<GenerationSettingsValue>) => void
-  usePlanner: boolean; setUsePlanner: (v: boolean) => void; runtimeSettings: RuntimeSettings | null
+  runtimeSettings: RuntimeSettings | null
   plannerProvider: string; setPlannerProvider: (v: string) => void; plannerModel: string; setPlannerModel: (v: string) => void
-  imageProvider: string; setImageProvider: (v: string) => void; onClose: () => void
+  onClose: () => void
 }) {
   const plannerProviders = runtimeSettings?.llm_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
   const selectedPlannerId = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
@@ -1087,10 +1120,6 @@ function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, run
         <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
       </div>
       <SettingsControls settings={settings} setSettings={setSettings} />
-      <label className="switch-row">
-        <span>AI Planner</span>
-        <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
-      </label>
       {runtimeSettings && (
         <div className="settings-controls planner-settings-controls">
           <label>
@@ -1103,14 +1132,39 @@ function SettingsPopover({ settings, setSettings, usePlanner, setUsePlanner, run
               {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
             </select>
           </label>
-          <label>
-            图片 provider
-            <select value={imageProvider} onChange={(e) => setImageProvider(e.target.value)}>
-              {runtimeSettings.image_providers.filter((p) => p.enabled && p.allow_user_select).map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
-            </select>
-          </label>
         </div>
       )}
+    </div>
+  )
+}
+
+function ImageProviderPopover({ runtimeSettings, value, onSelect, onClose }: {
+  runtimeSettings: RuntimeSettings | null
+  value: string
+  onSelect: (value: string) => void
+  onClose: () => void
+}) {
+  const providers = runtimeSettings?.image_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
+  return (
+    <div className="image-provider-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="image-provider-popover-head">
+        <strong>图片 provider</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+      </div>
+      <div className="image-provider-list">
+        {providers.length === 0 && <p className="empty-note">暂无可选 provider</p>}
+        {providers.map((provider) => (
+          <button
+            key={provider.id}
+            type="button"
+            className={`image-provider-option ${value === provider.id ? 'active' : ''}`}
+            onClick={() => onSelect(provider.id)}
+          >
+            <span>{provider.name || provider.id}</span>
+            {value === provider.id && <Check size={14} />}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }

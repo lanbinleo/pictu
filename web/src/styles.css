@@ -999,6 +999,7 @@ pre {
   bottom: calc(100% + 10px);
   z-index: 8;
   width: min(340px, calc(100vw - 36px));
+  max-height: min(520px, calc(100dvh - 36px));
   display: grid;
   gap: 12px;
   border-radius: 12px;
@@ -1006,6 +1007,7 @@ pre {
   box-shadow: 0px 0px 0px 1px var(--border), 0 12px 32px rgba(20, 20, 19, 0.14);
   padding: 14px;
   animation: modal-pop 0.14s ease both;
+  overflow-y: auto;
 }
 
 .settings-popover-head {
@@ -1120,6 +1122,75 @@ pre {
   animation: modal-pop 0.16s ease both;
 }
 
+.image-provider-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 8;
+  width: min(220px, calc(100vw - 36px));
+  display: grid;
+  gap: 10px;
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0px 0px 0px 1px var(--border), 0 12px 32px rgba(20, 20, 19, 0.14);
+  padding: 12px;
+  animation: modal-pop 0.14s ease both;
+}
+
+.image-provider-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.image-provider-popover-head strong {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.92rem;
+}
+
+.image-provider-popover .icon-button {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+}
+
+.image-provider-list {
+  display: grid;
+  gap: 6px;
+}
+
+.image-provider-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 0 10px;
+  text-align: left;
+  box-shadow: var(--ring);
+}
+
+.image-provider-option.active {
+  color: #faf9f5;
+  background: var(--accent);
+  box-shadow: 0px 0px 0px 1px var(--accent);
+}
+
+.image-provider-option span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .asset-gallery-head,
 .panel-title-row {
   display: flex;
@@ -1186,6 +1257,17 @@ pre {
   display: grid;
   place-items: center;
   color: var(--soft);
+}
+
+.composer.centered .settings-popover,
+.composer.centered .asset-gallery-popover,
+.composer.centered .image-provider-popover {
+  top: calc(100% + 10px);
+  bottom: auto;
+}
+
+.provider-menu-button {
+  position: relative;
 }
 
 /* ── Asset grid & tiles ── */
@@ -2784,6 +2866,11 @@ pre {
   .send-button {
     width: 38px;
     height: 38px;
+    flex-basis: 38px;
+  }
+
+  .provider-menu-button {
+    width: 38px;
     flex-basis: 38px;
   }
 
