@@ -1946,8 +1946,7 @@ pre {
 
 .canvas-node {
   position: absolute;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  display: block;
   border-radius: 8px;
   background: var(--panel);
   box-shadow: 0 0 0 1px var(--border), 0 12px 28px rgba(20, 20, 19, 0.14);
@@ -1968,7 +1967,26 @@ pre {
   background: var(--bg);
 }
 
+.canvas-blank-preview,
+.canvas-selected-blank {
+  width: 100%;
+  height: 100%;
+  min-height: 120px;
+  background:
+    linear-gradient(45deg, color-mix(in srgb, var(--border) 55%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in srgb, var(--border) 55%, transparent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in srgb, var(--border) 55%, transparent) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in srgb, var(--border) 55%, transparent) 75%),
+    var(--panel);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
 .canvas-node span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
   min-height: 30px;
   display: block;
   overflow: hidden;
@@ -1976,6 +1994,7 @@ pre {
   text-overflow: ellipsis;
   padding: 6px 8px;
   color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
   font-size: 0.78rem;
 }
 
@@ -1994,6 +2013,41 @@ pre {
 .canvas-empty p {
   margin: 0;
   font-size: 0.92rem;
+}
+
+.canvas-selection-box {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid var(--focus);
+  background: color-mix(in srgb, var(--focus) 14%, transparent);
+  pointer-events: none;
+}
+
+.canvas-context-menu {
+  position: absolute;
+  z-index: 5;
+  width: 132px;
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 5px;
+  box-shadow: 0px 0px 0px 1px var(--border), 0 12px 28px rgba(20, 20, 19, 0.16);
+}
+
+.canvas-context-menu button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0 8px;
+  font-size: 0.82rem;
+}
+
+.canvas-context-menu button:hover {
+  background: var(--panel-2);
 }
 
 .canvas-inspector {
@@ -2025,6 +2079,28 @@ pre {
   flex-basis: 32px;
 }
 
+.canvas-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 3px;
+  box-shadow: var(--ring);
+}
+
+.canvas-tabs button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.canvas-tabs button.active {
+  background: var(--panel);
+  color: var(--text);
+}
+
 .canvas-tools {
   display: grid;
   gap: 9px;
@@ -2042,7 +2118,13 @@ pre {
   gap: 8px;
 }
 
-.canvas-library button {
+.canvas-library-item {
+  position: relative;
+  display: grid;
+  gap: 4px;
+}
+
+.canvas-library-thumb {
   aspect-ratio: 1;
   border: 0;
   border-radius: 8px;
@@ -2052,10 +2134,28 @@ pre {
   box-shadow: var(--ring);
 }
 
-.canvas-library img {
+.canvas-library-item.selected .canvas-library-thumb {
+  box-shadow: 0px 0px 0px 2px var(--accent);
+}
+
+.canvas-library-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.canvas-library-ref {
+  min-height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.canvas-library-item.selected .canvas-library-ref {
+  color: #faf9f5;
+  background: var(--accent);
 }
 
 .canvas-selected {

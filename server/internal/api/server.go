@@ -496,10 +496,12 @@ func (s *Server) useAsset(c *gin.Context) {
 		return
 	}
 	if source.SessionID == sessionID {
+		_ = s.store.TouchAssetsUsed(c, user, []int64{source.ID})
 		c.JSON(http.StatusOK, gin.H{"asset": source})
 		return
 	}
 	if existing, err := s.store.FindAssetByHash(c, user, sessionID, source.Provider, source.ContentHash); err == nil {
+		_ = s.store.TouchAssetsUsed(c, user, []int64{existing.ID})
 		c.JSON(http.StatusOK, gin.H{"asset": existing, "deduped": true})
 		return
 	}
@@ -508,6 +510,7 @@ func (s *Server) useAsset(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	_ = s.store.TouchAssetsUsed(c, user, []int64{asset.ID})
 	c.JSON(http.StatusOK, gin.H{"asset": asset})
 }
 
@@ -558,6 +561,7 @@ func (s *Server) generate(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	_ = s.store.TouchAssetsUsed(c, user, req.AssetIDs)
 	var imageURLs []string
 	var imageNames []string
 	for i, asset := range assets {
@@ -689,7 +693,7 @@ func (s *Server) generate(c *gin.Context) {
 	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 	if task.Status == "completed" {
-		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), task)
+		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), user, sessionID, task)
 	} else {
 		go s.pollTask(task.ID)
 	}
@@ -727,6 +731,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	_ = s.store.TouchAssetsUsed(c, user, req.AssetIDs)
 	var imageURLs []string
 	var imageNames []string
 	for i, asset := range assets {
@@ -853,7 +858,7 @@ func (s *Server) generateStream(c *gin.Context) {
 	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 	if task.Status == "completed" {
-		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), task)
+		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), user, sessionID, task)
 	} else {
 		go s.pollTask(task.ID)
 	}
@@ -1035,13 +1040,13 @@ func (s *Server) pollTask(providerTaskID string) {
 	defer cancel()
 	ticker := time.NewTicker(s.cfg.Evolink.PollInterval())
 	defer ticker.Stop()
-	task, _, err := s.store.GetTaskByProviderID(context.Background(), providerTaskID)
-	if err != nil || task.Provider == "" {
-		task.Provider = "evolink"
+	localTask, taskUser, err := s.store.GetTaskByProviderID(context.Background(), providerTaskID)
+	if err != nil || localTask.Provider == "" {
+		localTask.Provider = "evolink"
 	}
 	client := s.evolink
 	if settings, err := s.runtimeSettings(context.Background()); err == nil {
-		if provider, ok := settings.imageProvider(task.Provider); ok && provider.Type == "evolink" {
+		if provider, ok := settings.imageProvider(localTask.Provider); ok && provider.Type == "evolink" {
 			client = evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, provider))
 		}
 	}
@@ -1063,9 +1068,10 @@ func (s *Server) pollTask(providerTaskID string) {
 				taskErr = task.Error.Message
 			}
 			if task.Status == "completed" {
-				resultJSON = []byte(s.archiveTaskImages(ctx, providerTaskID, string(resultJSON)))
+				s.storeCompletedImageTask(context.Background(), taskUser, localTask.SessionID, task)
+			} else {
+				_ = s.store.UpdateTask(context.Background(), providerTaskID, task.Status, task.Progress, string(resultJSON), taskErr)
 			}
-			_ = s.store.UpdateTask(context.Background(), providerTaskID, task.Status, task.Progress, string(resultJSON), taskErr)
 			if task.Status == "completed" || task.Status == "failed" {
 				if task.Status == "failed" {
 					_ = s.store.RefundTaskCredits(context.Background(), providerTaskID)

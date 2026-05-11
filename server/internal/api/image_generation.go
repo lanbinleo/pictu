@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"pictu/server/internal/evolink"
+	"pictu/server/internal/store"
 )
 
 func (s *Server) createImageTask(ctx context.Context, provider RuntimeImageProvider, req evolink.ImageRequest) (evolink.TaskResponse, error) {
@@ -96,9 +97,16 @@ func createRightCodesImageTask(ctx context.Context, provider RuntimeImageProvide
 	}, nil
 }
 
-func (s *Server) storeCompletedImageTask(ctx context.Context, task evolink.TaskResponse) string {
+func (s *Server) storeCompletedImageTask(ctx context.Context, user store.User, sessionID int64, task evolink.TaskResponse) string {
 	resultJSON, _ := json.Marshal(task)
-	finished := s.archiveTaskImages(ctx, task.ID, string(resultJSON))
+	archived, finished := s.archiveTaskImages(ctx, task.ID, string(resultJSON))
+	for _, item := range archived {
+		if existing, err := s.store.FindAssetByHash(ctx, user, sessionID, "generated", item.ContentHash); err == nil {
+			_ = s.store.TouchAssetsUsed(ctx, user, []int64{existing.ID})
+			continue
+		}
+		_, _ = s.store.SaveAsset(ctx, user, sessionID, item.FileName, item.MIMEType, item.URL, item.LocalURL, item.SizeBytes, "generated", item.ContentHash)
+	}
 	_ = s.store.UpdateTask(ctx, task.ID, task.Status, task.Progress, finished, "")
 	return finished
 }

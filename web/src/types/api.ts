@@ -35,6 +35,7 @@ export type Asset = {
   provider: string
   content_hash: string
   created_at: string
+  last_used_at?: string
 }
 
 export type Message = {
