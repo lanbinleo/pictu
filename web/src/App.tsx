@@ -55,6 +55,13 @@ type PendingRequest = {
   settings: { size: string; resolution: string; quality: string; count: number }
 }
 type GenerationSettingsValue = PendingRequest['settings']
+type NewConversationDraft = {
+  draft: string
+  assetIds: number[]
+  settings: GenerationSettingsValue
+  usePlanner: boolean
+  createdAt: number
+}
 type ToolDraft = {
   sessionId: number
   phase: 'preparing' | 'calling'
@@ -89,6 +96,8 @@ type CanvasDragState =
   | { type: 'pan'; pointerId: number; startX: number; startY: number; panX: number; panY: number }
   | { type: 'nodes'; pointerId: number; startX: number; startY: number; nodes: Record<string, { x: number; y: number }> }
   | { type: 'select'; pointerId: number; startX: number; startY: number; currentX: number; currentY: number }
+
+const NEW_CONVERSATION_DRAFT_PREFIX = 'pictu-new-conversation-draft:'
 
 export function App() {
   const token = useAppStore((s) => s.token)
@@ -158,6 +167,10 @@ function parseCommands(text: string): { cleanText: string; overrides: Partial<Ge
 function Workspace() {
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const setActiveSessionId = useAppStore((s) => s.setActiveSessionId)
+  const setDraft = useAppStore((s) => s.setDraft)
+  const setSelectedAssets = useAppStore((s) => s.setSelectedAssets)
+  const setSettings = useAppStore((s) => s.setSettings)
+  const setUsePlanner = useAppStore((s) => s.setUsePlanner)
   const clearAuth = useAppStore((s) => s.clearAuth)
   const user = useAppStore((s) => s.user)
   const setUser = useAppStore((s) => s.setUser)
@@ -318,6 +331,25 @@ function Workspace() {
     if (!session) return
     if (activeSessionId !== session.id) setActiveSessionId(session.id)
   }, [routeSessionId, isChatRoute, isCanvasRoute, sessions, activeSessionId])
+
+  useEffect(() => {
+    const publicID = detail?.session.public_id
+    if (!isChatRoute || !publicID) return
+    const key = `${NEW_CONVERSATION_DRAFT_PREFIX}${publicID}`
+    const raw = window.localStorage.getItem(key)
+    if (!raw) return
+    window.localStorage.removeItem(key)
+    try {
+      const next = JSON.parse(raw) as Partial<NewConversationDraft>
+      if (!next.createdAt || Date.now() - next.createdAt > 10 * 60 * 1000) return
+      if (typeof next.draft === 'string') setDraft(next.draft)
+      if (next.settings) setSettings(next.settings)
+      if (Array.isArray(next.assetIds)) setSelectedAssets(next.assetIds)
+      if (typeof next.usePlanner === 'boolean') setUsePlanner(next.usePlanner)
+    } catch {
+      return
+    }
+  }, [detail?.session.public_id, isChatRoute, setDraft, setSelectedAssets, setSettings, setUsePlanner])
 
   useEffect(() => {
     const running = (detail?.tasks ?? []).some((t) => t.status === 'pending' || t.status === 'processing')
@@ -692,7 +724,7 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
   const actionsRef = useRef<HTMLDivElement | null>(null)
   const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
   const galleryAssets = useMemo(() => uniqueAssets([...visibleAssets, ...libraryAssets]), [visibleAssets, libraryAssets])
-  const selectedAssets = galleryAssets.filter((a) => selectedAssetIds.includes(a.id))
+  const selectedAssets = useMemo(() => assetsInSelectionOrder(selectedAssetIds, [...assets, ...libraryAssets]), [selectedAssetIds, assets, libraryAssets])
   const composerCentered = !conversationStarted
   const greeting = useMemo(() => buildComposerGreeting(user), [user?.display_name, user?.email])
   const selectedPlannerProvider = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
@@ -811,7 +843,7 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
       const submitted = cleanText.trim() || draft.trim()
       const submittedAssetIds = [...selectedAssetIds]
       const submittedSettings = { ...settings, ...overrides }
-      const submittedAssets = assets.filter((a) => submittedAssetIds.includes(a.id))
+      const submittedAssets = assetsInSelectionOrder(submittedAssetIds, [...assets, ...libraryAssets])
       const now = new Date().toISOString()
       setOptimisticMessages((items) => ({
         ...items,
@@ -862,12 +894,47 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
     }
   }
 
-  async function confirmWith(nextSettings: typeof settings) {
+  async function confirmWith(nextSettings: typeof settings, prompt: string) {
     if (!pendingRequest) return
     await requestGenerate(pendingRequest.sessionId, pendingRequest.message, pendingRequest.assetIds, pendingRequest.settings, {
-      ...nextSettings, confirmed: true, prompt: pendingRequest.response.plan.prompt, assistant_message: pendingRequest.response.plan.assistant_message,
+      ...nextSettings, confirmed: true, prompt, assistant_message: pendingRequest.response.plan.assistant_message,
     })
     setPendingRequest(null)
+  }
+
+  async function copyPendingToNewConversation(nextSettings: typeof settings, prompt: string) {
+    if (!pendingRequest) return
+    setBusy(true)
+    setError('')
+    const newWindow = window.open('', '_blank')
+    try {
+      const res = await api.createSession('重新生成', 'chat')
+      const copiedAssetIds: number[] = []
+      for (const assetId of pendingRequest.assetIds) {
+        const copied = await api.useAsset(res.session.id, assetId)
+        copiedAssetIds.push(copied.asset.id)
+      }
+      const handoff: NewConversationDraft = {
+        draft: prompt.trim() || pendingRequest.response.plan.prompt,
+        assetIds: copiedAssetIds,
+        settings: nextSettings,
+        usePlanner: false,
+        createdAt: Date.now(),
+      }
+      window.localStorage.setItem(`${NEW_CONVERSATION_DRAFT_PREFIX}${res.session.public_id}`, JSON.stringify(handoff))
+      await onChanged()
+      const target = `/chat/${res.session.public_id}`
+      if (newWindow) {
+        newWindow.location.href = target
+      } else {
+        window.location.href = target
+      }
+    } catch (err) {
+      if (newWindow) newWindow.close()
+      setError(err instanceof Error ? err.message : '创建新对话失败')
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function uploadFiles(files: FileList | File[] | null) {
@@ -988,8 +1055,9 @@ function Composer({ sessionId, assets, onChanged, onEnsureSession, setStreamingT
       {pendingRequest?.response.requires_confirmation && (
         <PlanConfirmDialog
           plan={pendingRequest.response.plan} settings={pendingRequest.settings}
-          onAccept={() => confirmWith({ size: pendingRequest.response.plan.size, resolution: pendingRequest.response.plan.resolution, quality: pendingRequest.response.plan.quality, count: pendingRequest.response.plan.count })}
-          onKeepMine={() => confirmWith(pendingRequest.settings)}
+          onAccept={(prompt) => confirmWith({ size: pendingRequest.response.plan.size, resolution: pendingRequest.response.plan.resolution, quality: pendingRequest.response.plan.quality, count: pendingRequest.response.plan.count }, prompt)}
+          onKeepMine={(prompt) => confirmWith(pendingRequest.settings, prompt)}
+          onCopyToNew={(prompt) => copyPendingToNewConversation({ size: pendingRequest.response.plan.size, resolution: pendingRequest.response.plan.resolution, quality: pendingRequest.response.plan.quality, count: pendingRequest.response.plan.count }, prompt)}
           onCancel={() => {
             setPendingRequest(null)
             setOptimisticMessages((items) => ({ ...items, [pendingRequest.sessionId]: [] }))
@@ -1114,12 +1182,14 @@ function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, setUplo
   )
 }
 
-function PlanConfirmDialog({ plan, settings, onAccept, onKeepMine, onCancel }: {
+function PlanConfirmDialog({ plan, settings, onAccept, onKeepMine, onCopyToNew, onCancel }: {
   plan: GenerationPlan; settings: GenerationSettingsValue
-  onAccept: () => void; onKeepMine: () => void; onCancel: () => void
+  onAccept: (prompt: string) => void; onKeepMine: (prompt: string) => void; onCopyToNew: (prompt: string) => void; onCancel: () => void
 }) {
   const locale = useAppStore((s) => s.locale)
+  const [promptDraft, setPromptDraft] = useState(plan.prompt)
   const changed = plan.size !== settings.size || plan.resolution !== settings.resolution || plan.quality !== settings.quality || plan.count !== settings.count
+  const prompt = promptDraft.trim() || plan.prompt
   return (
     <div className="overlay">
       <section className="overlay-panel confirm-panel">
@@ -1147,10 +1217,16 @@ function PlanConfirmDialog({ plan, settings, onAccept, onKeepMine, onCancel }: {
                 </div>
               </div>
             )}
-            {plan.prompt && <details><summary>Prompt</summary><pre>{plan.prompt}</pre></details>}
+            {plan.prompt && (
+              <label className="prompt-edit-field">
+                Prompt
+                <textarea value={promptDraft} onChange={(e) => setPromptDraft(e.target.value)} />
+              </label>
+            )}
             <div className="confirm-actions">
-              <button className="secondary-button" onClick={onKeepMine}>保持我的参数</button>
-              <button className="primary-button" onClick={onAccept}>采用建议并生成</button>
+              <button className="secondary-button" onClick={() => onCopyToNew(prompt)}><MessageSquarePlus size={16} />复制到新对话</button>
+              <button className="secondary-button" onClick={() => onKeepMine(prompt)}>保持我的参数</button>
+              <button className="primary-button" onClick={() => onAccept(prompt)}>采用建议并生成</button>
             </div>
           </div>
         </div>
@@ -2574,6 +2650,11 @@ function uniqueAssets(assets: Asset[]) {
     seen.add(key)
     return true
   })
+}
+
+function assetsInSelectionOrder(ids: number[], assets: Asset[]) {
+  const byID = new Map(assets.map((asset) => [asset.id, asset]))
+  return ids.map((id) => byID.get(id)).filter((asset): asset is Asset => Boolean(asset))
 }
 
 function galleryItemsFromUsage(data: UsageResponse | null): GalleryItem[] {

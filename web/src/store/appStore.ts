@@ -28,6 +28,7 @@ type AppState = {
   setDraft: (draft: string) => void
   toggleAsset: (id: number) => void
   selectAsset: (id: number) => void
+  setSelectedAssets: (ids: number[]) => void
   deselectAsset: (id: number) => void
   clearSelectedAssets: () => void
   setSettings: (settings: Partial<AppState['settings']>) => void
@@ -72,6 +73,7 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           selectedAssetIds: state.selectedAssetIds.includes(id) ? state.selectedAssetIds : [...state.selectedAssetIds, id],
         })),
+      setSelectedAssets: (ids) => set({ selectedAssetIds: Array.from(new Set(ids)) }),
       deselectAsset: (id) => set((state) => ({ selectedAssetIds: state.selectedAssetIds.filter((assetId) => assetId !== id) })),
       clearSelectedAssets: () => set({ selectedAssetIds: [] }),
       setSettings: (settings) => set((state) => ({ settings: { ...state.settings, ...settings } })),

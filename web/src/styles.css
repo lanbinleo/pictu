@@ -1453,6 +1453,13 @@ pre {
 .plan-confirm-side .param-row span:first-child { color: var(--muted); }
 .plan-confirm-side .param-row span:last-child { font-weight: 500; }
 
+.prompt-edit-field textarea {
+  min-height: 180px;
+  max-height: 42vh;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+}
+
 .confirm-actions {
   display: flex;
   gap: 8px;
