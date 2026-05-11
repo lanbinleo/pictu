@@ -196,6 +196,7 @@ export type RuntimeImageProvider = {
   model: string
   credit_multiplier: number
   allow_user_select: boolean
+  use_builtin_storage: boolean
   enabled: boolean
 }
 

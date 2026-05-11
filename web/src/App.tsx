@@ -88,6 +88,7 @@ type CanvasState = {
   panX: number
   panY: number
   nodes: CanvasNode[]
+  hiddenSourceIds: string[]
 }
 type GalleryItem =
   | { id: string; kind: 'asset'; asset: Asset; url: string; title: string; provider: string; created_at: string; generated: boolean }
@@ -1548,7 +1549,11 @@ function CanvasPage({ detail, sessionId, runtimeSettings, onChanged, onRename, o
     try {
       const res = asset.session_id === sessionId ? { asset } : await api.useAsset(sessionId, asset.id)
       const node = nodeFromAsset(res.asset, canvas.nodes.length)
-      updateCanvas((current) => ({ ...current, nodes: upsertCanvasNode(current.nodes, node) }))
+      updateCanvas((current) => ({
+        ...current,
+        nodes: upsertCanvasNode(current.nodes, node),
+        hiddenSourceIds: current.hiddenSourceIds.filter((id) => id !== node.id),
+      }))
       setSelectedIds([node.id])
       setPanelTab('image')
       await onChanged()
@@ -1740,7 +1745,17 @@ function CanvasPage({ detail, sessionId, runtimeSettings, onChanged, onRename, o
     if (event.key !== 'Delete' && event.key !== 'Backspace') return
     if (selectedIds.length === 0) return
     event.preventDefault()
-    updateCanvas((current) => ({ ...current, nodes: current.nodes.filter((node) => !selectedIds.includes(node.id)) }))
+    updateCanvas((current) => {
+      const hiddenSourceIds = new Set(current.hiddenSourceIds)
+      for (const node of current.nodes) {
+        if (selectedIds.includes(node.id) && node.source !== 'local') hiddenSourceIds.add(node.id)
+      }
+      return {
+        ...current,
+        nodes: current.nodes.filter((node) => !selectedIds.includes(node.id) || node.source === 'local'),
+        hiddenSourceIds: Array.from(hiddenSourceIds),
+      }
+    })
     setSelectedIds([])
   }
 
@@ -2405,6 +2420,7 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
   const numberValue = (value: string) => Number.isFinite(Number(value)) ? Number(value) : 0
   const providerListKey = (index: number) => `llm-models-${index}`
   const providerListId = (index: number) => `${providerListKey(index)}-list`
+  const imageModelListId = 'image-models-list'
 
   function clearModelCache(index: number) {
     const key = providerListKey(index)
@@ -2540,23 +2556,33 @@ function AdminSystemSettings({ settings, onChange, onSave }: { settings: Runtime
         )}
         {section === 'image' && (
           <section className="panel-block provider-list">
-            <h3>图片 provider</h3>
+            <div className="panel-head">
+              <h3>图片 provider</h3>
+              <button type="button" className="secondary-button" onClick={() => patch({ image_providers: [...settings.image_providers, { id: `image-${settings.image_providers.length + 1}`, name: 'New Image', type: 'right_codes', base_url: 'https://www.right.codes/draw', files_base_url: '', api_key: '', model: 'gpt-image-2', credit_multiplier: 1, allow_user_select: true, use_builtin_storage: true, enabled: true }] })}><Plus size={16} />新增</button>
+            </div>
             {settings.image_providers.map((p, i) => (
               <div className="provider-editor" key={`${p.id}-${i}`}>
                 <label><span>ID</span><input value={p.id} onChange={(e) => patchImage(i, { id: e.target.value })} /></label>
-                <label><span>名称</span><input value={p.name} onChange={(e) => patchImage(i, { name: e.target.value })} /></label>
+                <label><span>模型昵称</span><input value={p.name} onChange={(e) => patchImage(i, { name: e.target.value })} /></label>
                 <label><span>类型</span><select value={p.type} onChange={(e) => patchImage(i, { type: e.target.value })}><option value="evolink">evolink</option><option value="right_codes">right_codes</option></select></label>
-                <label><span>Model</span><input value={p.model} onChange={(e) => patchImage(i, { model: e.target.value })} /></label>
+                <label><span>Model</span><input list={imageModelListId} value={p.model} onChange={(e) => patchImage(i, { model: e.target.value })} /></label>
                 <label><span>Base URL</span><input value={p.base_url} onChange={(e) => patchImage(i, { base_url: e.target.value })} /></label>
                 <label><span>Files Base URL</span><input value={p.files_base_url} onChange={(e) => patchImage(i, { files_base_url: e.target.value })} /></label>
                 <label><span>API Key</span><input value={p.api_key} onChange={(e) => patchImage(i, { api_key: e.target.value })} /></label>
                 <label><span>Multiplier</span><input type="number" step="0.01" value={p.credit_multiplier} onChange={(e) => patchImage(i, { credit_multiplier: numberValue(e.target.value) })} /></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.allow_user_select} onChange={(e) => patchImage(i, { allow_user_select: e.target.checked })} /><span>允许用户选择</span></label>
+                <label className="toggle-row"><input type="checkbox" checked={Boolean(p.use_builtin_storage)} onChange={(e) => patchImage(i, { use_builtin_storage: e.target.checked })} /><span>使用内置图床</span></label>
                 <label className="toggle-row"><input type="checkbox" checked={p.enabled} onChange={(e) => patchImage(i, { enabled: e.target.checked })} /><span>启用</span></label>
               </div>
             ))}
           </section>
         )}
+        <div style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden' }}>
+          <datalist id={imageModelListId}>
+            <option value="gpt-image-2">gpt-image-2</option>
+            <option value="gpt-image-2-vip">gpt-image-2-vip</option>
+          </datalist>
+        </div>
         {section === 'billing' && (
           <section className="panel-block system-settings-grid">
             <h3>计费规则</h3>
@@ -2687,7 +2713,7 @@ function galleryItemsFromUsage(data: UsageResponse | null): GalleryItem[] {
 const defaultRemoveBackgroundPrompt = 'Remove the background from the selected image. Keep the subject unchanged, preserve edges and fine details, and output a transparent PNG.'
 
 function emptyCanvasState(): CanvasState {
-  return { zoom: 1, panX: 60, panY: 60, nodes: [] }
+  return { zoom: 1, panX: 60, panY: 60, nodes: [], hiddenSourceIds: [] }
 }
 
 function parseCanvasState(raw?: string): CanvasState {
@@ -2695,11 +2721,13 @@ function parseCanvasState(raw?: string): CanvasState {
   try {
     const parsed = JSON.parse(raw) as Partial<CanvasState>
     const nodes = Array.isArray(parsed.nodes) ? parsed.nodes.filter(isCanvasNode) : []
+    const hiddenSourceIds = Array.isArray(parsed.hiddenSourceIds) ? parsed.hiddenSourceIds.filter((item): item is string => typeof item === 'string') : []
     return {
       zoom: clampNumber(parsed.zoom, 0.2, 3, 1),
       panX: typeof parsed.panX === 'number' ? parsed.panX : 60,
       panY: typeof parsed.panY === 'number' ? parsed.panY : 60,
       nodes,
+      hiddenSourceIds,
     }
   } catch {
     return emptyCanvasState()
@@ -2721,7 +2749,10 @@ function isCanvasNode(value: unknown): value is CanvasNode {
 function mergeCanvasState(state: CanvasState, sources: CanvasNode[]): CanvasState {
   const byID = new Map(state.nodes.map((node) => [node.id, node]))
   const localNodes = state.nodes.filter((node) => node.source === 'local')
-  const merged = sources.map((node) => ({ ...node, ...byID.get(node.id), url: node.url, title: byID.get(node.id)?.title || node.title }))
+  const hiddenSourceIds = new Set(state.hiddenSourceIds)
+  const merged = sources
+    .filter((node) => !hiddenSourceIds.has(node.id))
+    .map((node) => ({ ...node, ...byID.get(node.id), url: node.url, title: byID.get(node.id)?.title || node.title }))
   return { ...state, nodes: [...localNodes, ...merged] }
 }
 

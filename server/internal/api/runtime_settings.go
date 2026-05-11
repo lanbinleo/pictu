@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -70,16 +71,17 @@ type RuntimeUploadProvider struct {
 }
 
 type RuntimeImageProvider struct {
-	ID               string  `json:"id"`
-	Name             string  `json:"name"`
-	Type             string  `json:"type"`
-	BaseURL          string  `json:"base_url"`
-	FilesBaseURL     string  `json:"files_base_url"`
-	APIKey           string  `json:"api_key"`
-	Model            string  `json:"model"`
-	CreditMultiplier float64 `json:"credit_multiplier"`
-	AllowUserSelect  *bool   `json:"allow_user_select,omitempty"`
-	Enabled          bool    `json:"enabled"`
+	ID                string  `json:"id"`
+	Name              string  `json:"name"`
+	Type              string  `json:"type"`
+	BaseURL           string  `json:"base_url"`
+	FilesBaseURL      string  `json:"files_base_url"`
+	APIKey            string  `json:"api_key"`
+	Model             string  `json:"model"`
+	CreditMultiplier  float64 `json:"credit_multiplier"`
+	AllowUserSelect   *bool   `json:"allow_user_select,omitempty"`
+	UseBuiltinStorage bool    `json:"use_builtin_storage"`
+	Enabled           bool    `json:"enabled"`
 }
 
 type RuntimeLLMModel struct {
@@ -103,6 +105,7 @@ func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
 		maxContext = 12
 	}
 
+	rightCodesKey := rightCodesAPIKey()
 	settings := RuntimeSettings{
 		Billing: RuntimeBilling{
 			SignupCredits:         cfg.Billing.SignupCredits,
@@ -161,15 +164,27 @@ func runtimeSettingsFromConfig(cfg config.Config) RuntimeSettings {
 			AllowUserSelect:  boolPtr(true),
 			Enabled:          true,
 		}, {
-			ID:               "right-codes",
-			Name:             "Right Code Draw",
-			Type:             "right_codes",
-			BaseURL:          "https://www.right.codes/draw",
-			APIKey:           "",
-			Model:            "gpt-image-2",
-			CreditMultiplier: 1,
-			AllowUserSelect:  boolPtr(true),
-			Enabled:          true,
+			ID:                "right-codes",
+			Name:              "Right Code 1K",
+			Type:              "right_codes",
+			BaseURL:           "https://www.right.codes/draw",
+			APIKey:            rightCodesKey,
+			Model:             "gpt-image-2",
+			CreditMultiplier:  1,
+			AllowUserSelect:   boolPtr(true),
+			UseBuiltinStorage: true,
+			Enabled:           true,
+		}, {
+			ID:                "right-codes-vip",
+			Name:              "Right Code VIP",
+			Type:              "right_codes",
+			BaseURL:           "https://www.right.codes/draw",
+			APIKey:            rightCodesKey,
+			Model:             "gpt-image-2-vip",
+			CreditMultiplier:  2,
+			AllowUserSelect:   boolPtr(true),
+			UseBuiltinStorage: true,
+			Enabled:           true,
 		}},
 	}
 
@@ -294,7 +309,20 @@ func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 		if settings.ImageProviders[i].AllowUserSelect == nil {
 			settings.ImageProviders[i].AllowUserSelect = boolPtr(true)
 		}
+		if settings.ImageProviders[i].Type == "right_codes" && settings.ImageProviders[i].APIKey == "" {
+			settings.ImageProviders[i].APIKey = rightCodesAPIKey()
+		}
+		if settings.ImageProviders[i].Type == "right_codes" && settings.ImageProviders[i].BaseURL == "" {
+			settings.ImageProviders[i].BaseURL = "https://www.right.codes/draw"
+		}
+		if settings.ImageProviders[i].Type == "right_codes" && settings.ImageProviders[i].Model == "" {
+			settings.ImageProviders[i].Model = "gpt-image-2"
+		}
+		if settings.ImageProviders[i].Type == "right_codes" && settings.ImageProviders[i].FilesBaseURL == "" {
+			settings.ImageProviders[i].UseBuiltinStorage = true
+		}
 	}
+	settings = ensureBuiltinImageProviders(settings)
 	hasOpenRouter := false
 	for _, provider := range settings.LLMProviders {
 		if provider.ID == "openrouter" {
@@ -333,6 +361,55 @@ func normalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 		settings.Defaults.ImageProvider = settings.ImageProviders[0].ID
 	}
 	return settings
+}
+
+func ensureBuiltinImageProviders(settings RuntimeSettings) RuntimeSettings {
+	rightCodesKey := rightCodesAPIKey()
+	required := []RuntimeImageProvider{
+		{
+			ID:                "right-codes",
+			Name:              "Right Code 1K",
+			Type:              "right_codes",
+			BaseURL:           "https://www.right.codes/draw",
+			APIKey:            rightCodesKey,
+			Model:             "gpt-image-2",
+			CreditMultiplier:  1,
+			AllowUserSelect:   boolPtr(true),
+			UseBuiltinStorage: true,
+			Enabled:           true,
+		},
+		{
+			ID:                "right-codes-vip",
+			Name:              "Right Code VIP",
+			Type:              "right_codes",
+			BaseURL:           "https://www.right.codes/draw",
+			APIKey:            rightCodesKey,
+			Model:             "gpt-image-2-vip",
+			CreditMultiplier:  2,
+			AllowUserSelect:   boolPtr(true),
+			UseBuiltinStorage: true,
+			Enabled:           true,
+		},
+	}
+	existing := map[string]bool{}
+	for _, provider := range settings.ImageProviders {
+		existing[provider.ID] = true
+	}
+	for _, provider := range required {
+		if !existing[provider.ID] {
+			settings.ImageProviders = append(settings.ImageProviders, provider)
+		}
+	}
+	return settings
+}
+
+func rightCodesAPIKey() string {
+	for _, key := range []string{"RIGHT_CODES_API_KEY", "RIGHTCODES_API_KEY"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func boolPtr(v bool) *bool {

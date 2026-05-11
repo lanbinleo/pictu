@@ -658,6 +658,7 @@ func (s *Server) generate(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "unknown image provider")
 		return
 	}
+	imageURLs = imageReferenceURLs(imageProvider, assets)
 	baseCost := EstimateCost(settings.Billing.ImageBaseCost, settings.Billing.ImageInputCost, settings.Billing.LowQualityMultiplier, settings.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
 	cost := multiplyCost(baseCost, imageProvider.CreditMultiplier)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
@@ -827,6 +828,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		_ = flush("error", gin.H{"error": "unknown image provider"})
 		return
 	}
+	imageURLs = imageReferenceURLs(imageProvider, assets)
 	baseCost := EstimateCost(settings.Billing.ImageBaseCost, settings.Billing.ImageInputCost, settings.Billing.LowQualityMultiplier, settings.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
 	cost := multiplyCost(baseCost, imageProvider.CreditMultiplier)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
@@ -1292,6 +1294,37 @@ func plannerReferenceURLs(assets []store.Asset) []string {
 		}
 		if strings.HasPrefix(strings.ToLower(url), "http://") || strings.HasPrefix(strings.ToLower(url), "https://") {
 			urls = append(urls, url)
+		}
+	}
+	return urls
+}
+
+func imageReferenceURLs(provider RuntimeImageProvider, assets []store.Asset) []string {
+	var urls []string
+	for _, asset := range assets {
+		candidate := strings.TrimSpace(asset.URL)
+		if provider.UseBuiltinStorage {
+			candidate = strings.TrimSpace(asset.LocalURL)
+			if candidate != "" && !strings.HasPrefix(strings.ToLower(candidate), "http://") && !strings.HasPrefix(strings.ToLower(candidate), "https://") {
+				base := strings.TrimRight(strings.TrimSpace(provider.FilesBaseURL), "/")
+				if base != "" {
+					candidate = base + "/" + strings.TrimLeft(candidate, "/")
+				}
+			}
+			if candidate == "" {
+				candidate = strings.TrimSpace(asset.URL)
+			}
+		} else if candidate == "" {
+			candidate = strings.TrimSpace(asset.LocalURL)
+			if candidate != "" && !strings.HasPrefix(strings.ToLower(candidate), "http://") && !strings.HasPrefix(strings.ToLower(candidate), "https://") {
+				base := strings.TrimRight(strings.TrimSpace(provider.FilesBaseURL), "/")
+				if base != "" {
+					candidate = base + "/" + strings.TrimLeft(candidate, "/")
+				}
+			}
+		}
+		if strings.HasPrefix(strings.ToLower(candidate), "http://") || strings.HasPrefix(strings.ToLower(candidate), "https://") {
+			urls = append(urls, candidate)
 		}
 	}
 	return urls

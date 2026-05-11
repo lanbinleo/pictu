@@ -41,6 +41,9 @@ func createRightCodesImageTask(ctx context.Context, provider RuntimeImageProvide
 	if body.Model == "" {
 		body.Model = "gpt-image-2"
 	}
+	if body.Model == "gpt-image-2" {
+		body.Size = "1024x1024"
+	}
 	if body.N <= 0 {
 		body.N = 1
 	}
