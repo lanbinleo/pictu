@@ -845,7 +845,14 @@ func (s *Server) generateStream(c *gin.Context) {
 		N:          plan.Count,
 	}
 	_ = flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt})
-	task, err := s.createImageTask(c.Request.Context(), imageProvider, evReq)
+	var task evolink.TaskResponse
+	if imageProvider.Type == "right_codes" {
+		task, err = createRightCodesImageTaskStream(c.Request.Context(), imageProvider, evReq, func(progress int) error {
+			return flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt, "progress": progress})
+		})
+	} else {
+		task, err = s.createImageTask(c.Request.Context(), imageProvider, evReq)
+	}
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
 		_ = flush("error", gin.H{"error": err.Error()})

@@ -28,6 +28,7 @@ export type ToolDraft = {
   phase: 'preparing' | 'calling'
   prompt: string
   raw: string
+  progress?: number
 }
 
 export type CanvasNode = {

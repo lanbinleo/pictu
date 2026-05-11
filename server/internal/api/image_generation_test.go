@@ -24,3 +24,22 @@ func TestRightCodesImageSize(t *testing.T) {
 		})
 	}
 }
+
+func TestRightCodesProgressFromText(t *testing.T) {
+	progress, ok := rightCodesProgressFromText("Progressing...\n50% ")
+	if !ok || progress != 50 {
+		t.Fatalf("rightCodesProgressFromText() = %d, %v; want 50, true", progress, ok)
+	}
+
+	progress, ok = rightCodesProgressFromText("95% 100% ")
+	if !ok || progress != 100 {
+		t.Fatalf("rightCodesProgressFromText() = %d, %v; want 100, true", progress, ok)
+	}
+}
+
+func TestRightCodesImageURLsFromText(t *testing.T) {
+	got := rightCodesImageURLsFromText("\nSuccessfully Generated Image\n\n![image](https://example.com/out.png)")
+	if len(got) != 1 || got[0] != "https://example.com/out.png" {
+		t.Fatalf("rightCodesImageURLsFromText() = %#v", got)
+	}
+}

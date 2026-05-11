@@ -125,7 +125,7 @@ export type GenerateResponse = {
 export type StreamEvent =
   | { type: 'content'; text: string }
   | { type: 'thinking'; text: string }
-  | { type: 'tool'; phase: 'preparing' | 'calling'; text?: string; prompt?: string }
+  | { type: 'tool'; phase: 'preparing' | 'calling'; text?: string; prompt?: string; progress?: number }
   | ({ type: 'confirm' } & GenerateResponse)
   | ({ type: 'done' } & GenerateResponse)
   | { type: 'error'; error: string }

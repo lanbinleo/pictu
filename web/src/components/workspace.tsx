@@ -149,7 +149,7 @@ export function MessageStream({ messages, tasks, streamingText, thinkingText, to
   const [preview, setPreview] = useState<string | null>(null)
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages.length, tasks.length, streamingText, thinkingText, toolDraft?.prompt, toolDraft?.phase])
+  }, [messages.length, tasks.length, streamingText, thinkingText, toolDraft?.prompt, toolDraft?.phase, toolDraft?.progress])
 
   const latestTask = tasks[0]
   const resultImages = useMemo(() => extractImages(latestTask), [latestTask?.result_json])
@@ -193,7 +193,11 @@ export function MessageStream({ messages, tasks, streamingText, thinkingText, to
       )}
       {toolDraft && (
         <article className="task-card tool-draft-card">
-          <div className="task-meta"><span>{translate(locale, `tool.${toolDraft.phase}`)}</span><Loader2 className="spin" size={16} /></div>
+          <div className="task-meta">
+            <span>{translate(locale, `tool.${toolDraft.phase}`)}</span>
+            {typeof toolDraft.progress === 'number' ? <strong>{toolDraft.progress}%</strong> : <Loader2 className="spin" size={16} />}
+          </div>
+          {typeof toolDraft.progress === 'number' && <div className="progress"><span style={{ width: `${Math.max(toolDraft.progress, 8)}%` }} /></div>}
           {toolDraft.prompt && <details open><summary>{translate(locale, 'tool.prompt')}</summary><pre>{toolDraft.prompt}</pre></details>}
         </article>
       )}
@@ -451,7 +455,13 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
         } else if (event.type === 'error') setError(event.error)
         else if (event.type === 'tool') {
           toolUsed = true
-          setToolDraft((c) => ({ sessionId: targetSessionId, phase: event.phase, raw: (c?.sessionId === targetSessionId ? c.raw : '') + (event.text ?? ''), prompt: event.prompt ?? c?.prompt ?? '' }))
+          setToolDraft((c) => ({
+            sessionId: targetSessionId,
+            phase: event.phase,
+            raw: (c?.sessionId === targetSessionId ? c.raw : '') + (event.text ?? ''),
+            prompt: event.prompt ?? c?.prompt ?? '',
+            progress: event.progress ?? (c?.sessionId === targetSessionId ? c.progress : undefined),
+          }))
         }
       })
     } catch (err) {

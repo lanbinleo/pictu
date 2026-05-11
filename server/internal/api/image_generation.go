@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -97,6 +99,133 @@ func createRightCodesImageTask(ctx context.Context, provider RuntimeImageProvide
 	}, nil
 }
 
+func createRightCodesImageTaskStream(ctx context.Context, provider RuntimeImageProvider, req evolink.ImageRequest, emitProgress func(int) error) (evolink.TaskResponse, error) {
+	body := rightCodesChatStreamRequest{
+		Model:    provider.Model,
+		Messages: []chatMessage{{Role: "user", Content: rightCodesChatContent(req)}},
+		Stream:   true,
+		Size:     rightCodesImageSize(req.Size, req.Resolution),
+		N:        req.N,
+		Image:    append([]string(nil), req.ImageURLs...),
+	}
+	if body.Model == "" {
+		body.Model = "gpt-image-2"
+	}
+	if body.N <= 0 {
+		body.N = 1
+	}
+	if len(body.Image) == 0 {
+		body.Image = nil
+	}
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		return evolink.TaskResponse{}, err
+	}
+	url := strings.TrimRight(provider.BaseURL, "/") + "/v1/chat/completions"
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return evolink.TaskResponse{}, err
+	}
+	reqHTTP.Header.Set("Authorization", "Bearer "+provider.APIKey)
+	reqHTTP.Header.Set("Content-Type", "application/json")
+	reqHTTP.Header.Set("Accept", "text/event-stream")
+
+	client := http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(reqHTTP)
+	if err != nil {
+		return evolink.TaskResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		payload, _ := io.ReadAll(resp.Body)
+		return evolink.TaskResponse{}, fmt.Errorf("right codes chat stream error %d: %s", resp.StatusCode, strings.TrimSpace(string(payload)))
+	}
+
+	var content strings.Builder
+	var responseID string
+	var model string
+	var created int64
+	var usage any
+	progress := 0
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		var chunk rightCodesChatStreamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+		if chunk.ID != "" {
+			responseID = chunk.ID
+		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		if chunk.Created > 0 {
+			created = chunk.Created
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		for _, choice := range chunk.Choices {
+			text := choice.Delta.Content
+			if text == "" {
+				continue
+			}
+			content.WriteString(text)
+			if next, ok := rightCodesProgressFromText(text); ok && next >= progress {
+				progress = next
+				if emitProgress != nil {
+					if err := emitProgress(progress); err != nil {
+						return evolink.TaskResponse{}, err
+					}
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return evolink.TaskResponse{}, err
+	}
+
+	results := rightCodesImageURLsFromText(content.String())
+	if len(results) == 0 {
+		return evolink.TaskResponse{}, fmt.Errorf("right codes chat stream did not return image urls")
+	}
+	if responseID == "" {
+		responseID = uuid.NewString()
+	}
+	if model == "" {
+		model = body.Model
+	}
+	if progress < 100 && emitProgress != nil {
+		if err := emitProgress(100); err != nil {
+			return evolink.TaskResponse{}, err
+		}
+	}
+	return evolink.TaskResponse{
+		Created:  created,
+		ID:       responseID,
+		Model:    model,
+		Object:   "image_generation",
+		Progress: 100,
+		Results:  results,
+		Status:   "completed",
+		Type:     "image",
+		Usage:    usage,
+	}, nil
+}
+
 func (s *Server) storeCompletedImageTask(ctx context.Context, user store.User, sessionID int64, task evolink.TaskResponse) string {
 	resultJSON, _ := json.Marshal(task)
 	archived, finished := s.archiveTaskImages(ctx, task.ID, string(resultJSON))
@@ -125,6 +254,27 @@ type rightCodesImageResponse struct {
 	Data    []struct {
 		URL string `json:"url"`
 	} `json:"data"`
+	Usage any `json:"usage,omitempty"`
+}
+
+type rightCodesChatStreamRequest struct {
+	Model    string        `json:"model,omitempty"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+	Size     string        `json:"size,omitempty"`
+	N        int           `json:"n,omitempty"`
+	Image    []string      `json:"image,omitempty"`
+}
+
+type rightCodesChatStreamChunk struct {
+	ID      string `json:"id"`
+	Created int64  `json:"created"`
+	Model   string `json:"model"`
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
 	Usage any `json:"usage,omitempty"`
 }
 
@@ -208,4 +358,84 @@ func roundToMultipleFloat(value float64, multiple int) int {
 
 func parseFloat(value string) (float64, error) {
 	return strconv.ParseFloat(strings.TrimSpace(value), 64)
+}
+
+func rightCodesChatContent(req evolink.ImageRequest) any {
+	prompt := strings.TrimSpace(req.Prompt)
+	size := rightCodesImageSize(req.Size, req.Resolution)
+	if size != "" {
+		prompt += "\n\nOutput size: " + size + "."
+	}
+	if req.N > 1 {
+		prompt += fmt.Sprintf("\nCreate %d images.", req.N)
+	}
+	if len(req.ImageURLs) == 0 {
+		return prompt
+	}
+	parts := []chatContentPart{{Type: "text", Text: prompt}}
+	for _, url := range req.ImageURLs {
+		url = strings.TrimSpace(url)
+		if url == "" {
+			continue
+		}
+		parts = append(parts, chatContentPart{
+			Type: "image_url",
+			ImageURL: &chatImageURLPart{
+				URL:    url,
+				Detail: "auto",
+			},
+		})
+	}
+	return parts
+}
+
+var rightCodesProgressPattern = regexp.MustCompile(`(\d{1,3})\s*%`)
+
+func rightCodesProgressFromText(text string) (int, bool) {
+	matches := rightCodesProgressPattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return 0, false
+	}
+	raw := matches[len(matches)-1][1]
+	progress, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 100 {
+		progress = 100
+	}
+	return progress, true
+}
+
+var (
+	rightCodesMarkdownImagePattern = regexp.MustCompile(`!\[[^\]]*\]\((https?://[^)\s]+)\)`)
+	rightCodesRawURLPattern        = regexp.MustCompile(`https?://[^\s)]+`)
+)
+
+func rightCodesImageURLsFromText(text string) []string {
+	seen := map[string]bool{}
+	var urls []string
+	add := func(raw string) {
+		url := strings.Trim(raw, " \t\r\n\"'<>")
+		if url == "" || seen[url] {
+			return
+		}
+		seen[url] = true
+		urls = append(urls, url)
+	}
+	for _, match := range rightCodesMarkdownImagePattern.FindAllStringSubmatch(text, -1) {
+		if len(match) > 1 {
+			add(match[1])
+		}
+	}
+	if len(urls) > 0 {
+		return urls
+	}
+	for _, match := range rightCodesRawURLPattern.FindAllString(text, -1) {
+		add(match)
+	}
+	return urls
 }
