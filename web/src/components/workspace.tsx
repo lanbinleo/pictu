@@ -36,7 +36,7 @@ import {
   imageRatioFromSize,
   imageSizeFromRatio,
   imageSizeLabel,
-  imageTileShape,
+  imageTileAspectRatio,
   NEW_CONVERSATION_DRAFT_PREFIX,
   parseCommands,
   normalizeGenerationSettings,
@@ -615,15 +615,13 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
             </label>
             <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数"><Settings2 size={18} /></button>
             <div className="composer-menu-wrap provider-menu-wrap">
-              <span className="provider-menu-label" title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}>
-                {selectedImageProviderLabel || '图片 provider'}
-              </span>
               <button
                 type="button"
                 className="provider-menu-button"
                 onClick={openImageProviderMenu}
                 title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}
               >
+                <span>{selectedImageProviderLabel || '图片 provider'}</span>
                 <ChevronDown size={14} />
               </button>
               {imageProviderOpen && (
@@ -918,7 +916,7 @@ export function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, 
   onPreview: (a: Asset) => void
   onClose: () => void
 }) {
-  const [tileShapes, setTileShapes] = useState<Record<number, 'square' | 'portrait' | 'landscape'>>({})
+  const [tileRatios, setTileRatios] = useState<Record<number, string>>({})
   return (
     <div className="asset-gallery-popover" onClick={(e) => e.stopPropagation()}>
       <div className="asset-gallery-head">
@@ -938,13 +936,18 @@ export function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, 
           {uploading ? <Loader2 className="spin" size={20} /> : <ImagePlus size={20} />}
         </button>
         {assets.map((asset) => (
-          <div key={asset.id} className={`asset-tile compact shape-${tileShapes[asset.id] ?? 'square'} ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} title={asset.file_name}>
+          <div
+            key={asset.id}
+            className={`asset-tile compact ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`}
+            style={{ aspectRatio: tileRatios[asset.id] ?? '1 / 1' }}
+            title={asset.file_name}
+          >
             <img
               src={assetImageSrc(asset)}
               alt={asset.file_name}
               onLoad={(event) => {
                 const { naturalWidth, naturalHeight } = event.currentTarget
-                setTileShapes((current) => ({ ...current, [asset.id]: imageTileShape(naturalWidth, naturalHeight) }))
+                setTileRatios((current) => ({ ...current, [asset.id]: imageTileAspectRatio(naturalWidth, naturalHeight) }))
               }}
             />
             <button className="asset-use" type="button" onClick={() => onUse(asset)} title="使用">

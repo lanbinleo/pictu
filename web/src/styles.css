@@ -1212,16 +1212,6 @@ pre {
   flex: 0 0 auto;
 }
 
-.provider-menu-label {
-  max-width: 96px;
-  overflow: hidden;
-  color: var(--soft);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 0.72rem;
-  line-height: 1;
-}
-
 .provider-menu-button,
 .count-menu-button {
   display: inline-flex;
@@ -1232,8 +1222,21 @@ pre {
   border-radius: 8px;
   background: transparent;
   color: var(--text);
-  padding: 0 4px;
+  padding: 0 8px;
   box-shadow: none;
+}
+
+.provider-menu-button {
+  min-width: 0;
+  max-width: 160px;
+}
+
+.provider-menu-button span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .provider-menu-button:hover,
@@ -2174,8 +2177,8 @@ pre {
 }
 
 .asset-tile.shape-square { aspect-ratio: 1 / 1; }
-.asset-tile.shape-portrait { aspect-ratio: 1 / 2; }
-.asset-tile.shape-landscape { aspect-ratio: 2 / 1; }
+.asset-tile.shape-portrait { aspect-ratio: 1 / 1.6; }
+.asset-tile.shape-landscape { aspect-ratio: 1.6 / 1; }
 
 /* ── Canvas page ── */
 
@@ -2482,8 +2485,8 @@ pre {
 .gallery-tile img {
   width: 100%;
   display: block;
-  object-fit: contain;
-  background: var(--panel);
+  object-fit: cover;
+  background: transparent;
   border-radius: 10px;
 }
 
@@ -3073,12 +3076,15 @@ pre {
     flex-basis: 38px;
   }
 
-  .provider-menu-label { max-width: 70px; }
-
   .provider-menu-button,
   .count-menu-button {
     min-height: 32px;
     padding-inline: 2px;
+  }
+
+  .provider-menu-button {
+    max-width: 128px;
+    padding-inline: 8px;
   }
 
   .size-grid {

@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import type { Asset, RuntimeSettings, UsageResponse } from '../types/api'
 import { ImageLightbox } from '../components/workspace'
-import { assetImageSrc, galleryItemsFromUsage, imageTileShape } from '../lib/workspace'
+import { assetImageSrc, galleryItemsFromUsage, imageTileAspectRatio } from '../lib/workspace'
 
 export function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSettings }: { activeSessionId: number | null; onSessionsChanged: () => void | Promise<void>; runtimeSettings: RuntimeSettings | null }) {
   const [data, setData] = useState<UsageResponse | null>(null)
@@ -17,7 +17,7 @@ export function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSetting
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const [tileShapes, setTileShapes] = useState<Record<string, 'square' | 'portrait' | 'landscape'>>({})
+  const [tileRatios, setTileRatios] = useState<Record<string, string>>({})
   const allGalleryItems = useMemo(() => galleryItemsFromUsage(data), [data])
   const galleryItems = useMemo(() => {
     if (filter === 'generated') return allGalleryItems.filter((item) => item.generated)
@@ -110,14 +110,19 @@ export function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSetting
         <div className={`gallery-masonry ${galleryItems.length === 0 ? 'is-empty' : ''}`}>
           {galleryItems.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
           {galleryItems.map((item) => (
-            <div key={item.id} className={`asset-tile gallery-tile shape-${tileShapes[item.id] ?? 'square'}`} title={item.title}>
+            <div
+              key={item.id}
+              className="asset-tile gallery-tile"
+              style={{ aspectRatio: tileRatios[item.id] ?? '1 / 1' }}
+              title={item.title}
+            >
               <img
                 src={item.url}
                 alt={item.title}
                 loading="lazy"
                 onLoad={(event) => {
                   const { naturalWidth, naturalHeight } = event.currentTarget
-                  setTileShapes((current) => ({ ...current, [item.id]: imageTileShape(naturalWidth, naturalHeight) }))
+                  setTileRatios((current) => ({ ...current, [item.id]: imageTileAspectRatio(naturalWidth, naturalHeight) }))
                 }}
               />
               <span className="asset-provider-badge">{item.provider}</span>

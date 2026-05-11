@@ -135,6 +135,11 @@ export function imageTileShape(width: number, height: number) {
   return 'square'
 }
 
+export function imageTileAspectRatio(width: number, height: number) {
+  if (!width || !height) return '1 / 1'
+  return `${width} / ${height}`
+}
+
 export function normalizeGenerationSettings(settings: GenerationSettingsValue): GenerationSettingsValue {
   return {
     size: normalizeImageSize(settings.size, settings.resolution),
