@@ -77,3 +77,20 @@ Start here before opening the whole tree:
 - Existing database content should be migrated forward when possible.
 - Default values should exist for new runtime settings so a fresh install works.
 - Read the current release version from the root `VERSION` file.
+
+## Frontend Structure
+
+- Keep `web/src/App.tsx` as the thin application shell: theme setup, router setup, and auth routing only.
+- Put the authenticated workspace frame in `web/src/Workspace.tsx`.
+- Put page-level code under `web/src/pages/`.
+- Put reusable React UI used by multiple pages under `web/src/components/`.
+- Put frontend-only helpers and shared page state types under `web/src/lib/workspace.ts`.
+- Do not move `web/src/lib/api.ts`, `web/src/types/api.ts`, or `web/src/store/appStore.ts` as part of page/component refactors unless the task explicitly asks for API, type, or store changes.
+
+## Frontend Change Rules
+
+- Prefer moving existing behavior into clearer files before changing behavior.
+- Keep page-specific business logic near the owning page unless it is reused elsewhere.
+- For API contract changes, update `web/src/lib/api.ts` and `web/src/types/api.ts` together.
+- Run `npm run build` from `web` after frontend refactors.
+
