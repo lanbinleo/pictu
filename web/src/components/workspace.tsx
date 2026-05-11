@@ -34,8 +34,15 @@ import {
   buildComposerGreeting,
   defaultRemoveBackgroundPrompt,
   extractImages,
+  imageRatioFromSize,
+  imageSizeFromRatio,
+  imageSizeLabel,
   NEW_CONVERSATION_DRAFT_PREFIX,
   parseCommands,
+  normalizeGenerationSettings,
+  normalizeImageSize,
+  IMAGE_RATIO_PRESETS,
+  IMAGE_RESOLUTION_PRESETS,
   splitReferenceMarkdown,
   type GenerationSettingsValue,
   type NewConversationDraft,
@@ -249,6 +256,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [assetGalleryOpen, setAssetGalleryOpen] = useState(false)
   const [imageProviderOpen, setImageProviderOpen] = useState(false)
+  const [countMenuOpen, setCountMenuOpen] = useState(false)
   const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
@@ -268,6 +276,8 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   const selectedPlannerModel = plannerModel || runtimeSettings?.defaults.planner_model || ''
   const selectedImageProvider = imageProvider || runtimeSettings?.defaults.image_provider || ''
   const selectedImageProviderLabel = runtimeSettings?.image_providers.find((p) => p.id === selectedImageProvider)?.name || selectedImageProvider
+  const effectiveSettings = useMemo(() => normalizeGenerationSettings(settings), [settings.size, settings.resolution, settings.quality, settings.count])
+  const selectedImageSizeLabel = imageSizeLabel(effectiveSettings.size)
 
   const parsedCommands = useMemo(() => parseCommands(draft), [draft])
   const hasCommandOverrides = Object.keys(parsedCommands.overrides).length > 0
@@ -301,6 +311,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     setAssetGalleryOpen((o) => !o)
     setSettingsOpen(false)
     setImageProviderOpen(false)
+    setCountMenuOpen(false)
     if (!assetGalleryOpen) loadAssetGallery()
   }
 
@@ -308,12 +319,21 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     setSettingsOpen((o) => !o)
     setAssetGalleryOpen(false)
     setImageProviderOpen(false)
+    setCountMenuOpen(false)
   }
 
   function openImageProviderMenu() {
     setImageProviderOpen((o) => !o)
     setSettingsOpen(false)
     setAssetGalleryOpen(false)
+    setCountMenuOpen(false)
+  }
+
+  function openCountMenu() {
+    setCountMenuOpen((o) => !o)
+    setSettingsOpen(false)
+    setAssetGalleryOpen(false)
+    setImageProviderOpen(false)
   }
 
   useEffect(() => {
@@ -324,18 +344,18 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   }, [draft])
 
   useEffect(() => {
-    if (!settingsOpen && !assetGalleryOpen && !imageProviderOpen) return
+    if (!settingsOpen && !assetGalleryOpen && !imageProviderOpen && !countMenuOpen) return
     if (galleryPreview) return
     function handleClick(event: MouseEvent) {
       if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
-        setSettingsOpen(false)
         setAssetGalleryOpen(false)
         setImageProviderOpen(false)
+        setCountMenuOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [settingsOpen, assetGalleryOpen, imageProviderOpen, galleryPreview])
+  }, [settingsOpen, assetGalleryOpen, imageProviderOpen, countMenuOpen, galleryPreview])
 
   async function ensureTargetSession() {
     if (sessionId) return sessionId
@@ -353,6 +373,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string },
   ) {
     if (!message.trim()) return
+    const normalizedBaseSettings = normalizeGenerationSettings(baseSettings)
     setBusy(true)
     setError('')
     try {
@@ -363,10 +384,10 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
       const res = await api.generate(targetSessionId, {
         message, asset_ids: assetIds, use_planner: usePlanner,
         planner_provider: selectedPlannerProvider, planner_model: selectedPlannerModel, image_provider: selectedImageProvider,
-        ...baseSettings, ...extra,
+        ...normalizedBaseSettings, ...extra,
       })
       if (res.requires_confirmation) {
-        setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, settings: baseSettings })
+        setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, settings: normalizedBaseSettings })
         return
       }
       if (res.generated || res.message) { setDraft(''); clearSelectedAssets() }
@@ -395,7 +416,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
       const { cleanText, overrides } = parseCommands(draft)
       const submitted = cleanText.trim() || draft.trim()
       const submittedAssetIds = [...selectedAssetIds]
-      const submittedSettings = { ...settings, ...overrides }
+      const submittedSettings = normalizeGenerationSettings({ ...settings, ...overrides })
       const submittedAssets = assetsInSelectionOrder(submittedAssetIds, [...assets, ...libraryAssets])
       const now = new Date().toISOString()
       setOptimisticMessages((items) => ({
@@ -450,7 +471,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   async function confirmWith(nextSettings: typeof settings, prompt: string) {
     if (!pendingRequest) return
     await requestGenerate(pendingRequest.sessionId, pendingRequest.message, pendingRequest.assetIds, pendingRequest.settings, {
-      ...nextSettings, confirmed: true, prompt, assistant_message: pendingRequest.response.plan.assistant_message,
+      ...normalizeGenerationSettings(nextSettings), confirmed: true, prompt, assistant_message: pendingRequest.response.plan.assistant_message,
     })
     setPendingRequest(null)
   }
@@ -470,7 +491,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
       const handoff: NewConversationDraft = {
         draft: prompt.trim() || pendingRequest.response.plan.prompt,
         assetIds: copiedAssetIds,
-        settings: nextSettings,
+        settings: normalizeGenerationSettings(nextSettings),
         usePlanner: false,
         createdAt: Date.now(),
       }
@@ -570,15 +591,9 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
             <button type="button" className="icon-button" onClick={openAssetGallery} title="参考图库">
               {uploading ? <Loader2 className="spin" size={18} /> : <Plus size={18} />}
             </button>
-            <button type="button" className="icon-button" onClick={openSettings} title="生成参数">
+            <button type="button" className="icon-button" onClick={openSettings} title={`生成参数：${selectedImageSizeLabel}`}>
               <SlidersHorizontal size={18} />
             </button>
-            {settingsOpen && (
-              <SettingsPopover settings={settings} setSettings={setSettings}
-                runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
-                plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel}
-                onClose={() => setSettingsOpen(false)} />
-            )}
             {assetGalleryOpen && (
               <AssetGalleryPopover
                 assets={galleryAssets} selectedAssetIds={selectedAssetIds} uploadProvider={uploadProvider} setUploadProvider={setUploadProvider}
@@ -591,23 +606,50 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
               <span>Planner</span>
               <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
             </label>
-            <button
-              type="button"
-              className="icon-button provider-menu-button"
-              onClick={openImageProviderMenu}
-              title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}
-            >
-              <Camera size={18} />
-            </button>
-            {imageProviderOpen && (
-              <ImageProviderPopover
-                runtimeSettings={runtimeSettings}
-                value={selectedImageProvider}
-                onSelect={(value) => { setImageProvider(value); setImageProviderOpen(false) }}
-                onClose={() => setImageProviderOpen(false)}
-              />
-            )}
             <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数"><Settings2 size={18} /></button>
+            <div className="composer-menu-wrap provider-menu-wrap">
+              <span className="provider-menu-label" title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}>
+                {selectedImageProviderLabel || '图片 provider'}
+              </span>
+              <button
+                type="button"
+                className="provider-menu-button"
+                onClick={openImageProviderMenu}
+                title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}
+              >
+                <Camera size={16} />
+                <ChevronDown size={14} />
+              </button>
+              {imageProviderOpen && (
+                <ImageProviderPopover
+                  runtimeSettings={runtimeSettings}
+                  value={selectedImageProvider}
+                  onSelect={(value) => { setImageProvider(value); setImageProviderOpen(false) }}
+                  onClose={() => setImageProviderOpen(false)}
+                />
+              )}
+            </div>
+            <div className="composer-menu-wrap count-menu-wrap">
+              <button
+                type="button"
+                className="count-menu-button"
+                onClick={openCountMenu}
+                title="数量"
+              >
+                <span>{`${effectiveSettings.count} 张`}</span>
+                <ChevronDown size={14} />
+              </button>
+              {countMenuOpen && (
+                <CountPopover
+                  value={effectiveSettings.count}
+                  onSelect={(value) => {
+                    setSettings({ count: value })
+                    setCountMenuOpen(false)
+                  }}
+                  onClose={() => setCountMenuOpen(false)}
+                />
+              )}
+            </div>
             <button className="send-button" disabled={busy || !draft.trim()} title="发送">
               {busy ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
             </button>
@@ -619,6 +661,12 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
         <MobileMoreDrawer assets={visibleAssets} selectedAssetIds={selectedAssetIds} toggleAsset={toggleAsset}
           settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner}
           onClose={() => setMobileToolsOpen(false)} onUpload={() => { setMobileToolsOpen(false); setAssetGalleryOpen(true); loadAssetGallery() }} />
+      )}
+      {settingsOpen && (
+        <SettingsPopover settings={settings} setSettings={setSettings}
+          runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
+          plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel}
+          onClose={() => setSettingsOpen(false)} />
       )}
       {galleryPreview && <ImageLightbox src={galleryPreview} onClose={() => setGalleryPreview(null)} />}
       {pendingRequest?.response.requires_confirmation && (
@@ -651,26 +699,30 @@ export function SettingsPopover({ settings, setSettings, runtimeSettings, planne
   const plannerProviders = runtimeSettings?.llm_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
   const selectedPlannerId = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
   return (
-    <div className="settings-popover" onClick={(e) => e.stopPropagation()}>
-      <div className="settings-popover-head">
-        <strong>生成参数</strong>
-        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
-      </div>
-      <SettingsControls settings={settings} setSettings={setSettings} />
-      {runtimeSettings && (
-        <div className="settings-controls planner-settings-controls">
-          <label>
-            Planner 模型
-            <select value={selectedPlannerId} onChange={(e) => {
-              const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
-              setPlannerProvider(e.target.value)
-              setPlannerModel(next?.planner_model || '')
-            }}>
-              {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
-            </select>
-          </label>
+    <div className="overlay" onClick={onClose}>
+      <section className="overlay-panel settings-panel" onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h2>生成参数</h2>
+          <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+        </header>
+        <div className="overlay-body settings-panel-body">
+          <SettingsControls settings={settings} setSettings={setSettings} />
+          {runtimeSettings && (
+            <div className="settings-controls planner-settings-controls">
+              <label>
+                Planner 模型
+                <select value={selectedPlannerId} onChange={(e) => {
+                  const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
+                  setPlannerProvider(e.target.value)
+                  setPlannerModel(next?.planner_model || '')
+                }}>
+                  {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+                </select>
+              </label>
+            </div>
+          )}
         </div>
-      )}
+      </section>
     </div>
   )
 }
@@ -706,31 +758,146 @@ export function ImageProviderPopover({ runtimeSettings, value, onSelect, onClose
   )
 }
 
+export function CountPopover({ value, onSelect, onClose }: {
+  value: number
+  onSelect: (value: number) => void
+  onClose: () => void
+}) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => setDraft(String(value)), [value])
+  return (
+    <div className="count-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="count-popover-head">
+        <strong>数量</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+      </div>
+      <div className="count-popover-grid">
+        {[1, 2, 3, 4].map((item) => (
+          <button
+            key={item}
+            type="button"
+            className={value === item ? 'active' : ''}
+            onClick={() => onSelect(item)}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
+      <label className="count-popover-input">
+        自定义
+        <input
+          type="number"
+          min={1}
+          max={4}
+          value={draft}
+          onChange={(e) => {
+            const next = e.target.value
+            setDraft(next)
+            const parsed = Number(next)
+            if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 4) onSelect(parsed)
+          }}
+        />
+      </label>
+    </div>
+  )
+}
+
 export function SettingsControls({ settings, setSettings }: { settings: GenerationSettingsValue; setSettings: (s: Partial<GenerationSettingsValue>) => void }) {
   const locale = useAppStore((s) => s.locale)
+  const normalizedSize = normalizeImageSize(settings.size, settings.resolution)
+  const previewLabel = imageSizeLabel(normalizedSize)
+  const selectedRatio = imageRatioFromSize(normalizedSize)
+  const [customWidth, setCustomWidth] = useState(1024)
+  const [customHeight, setCustomHeight] = useState(1024)
+  const presetSize = imageSizeFromRatio(selectedRatio, settings.resolution)
+  const isCustomSize = normalizedSize !== presetSize
+
+  useEffect(() => {
+    const parsed = normalizedSize.match(/^(\d+)x(\d+)$/)
+    if (!parsed) return
+    setCustomWidth(Number(parsed[1]))
+    setCustomHeight(Number(parsed[2]))
+  }, [normalizedSize])
+
   return (
     <div className="settings-controls">
-      <label title="比例为 auto 时，resolution 不参与尺寸推导。">
-        比例
-        <select value={settings.size} onChange={(e) => setSettings({ size: e.target.value })}>
-          {['auto', '1:1', '2:3', '3:2', '4:5', '5:4', '9:16', '16:9', '21:9'].map((i) => <option key={i}>{i}</option>)}
-        </select>
-      </label>
-      <label title="1K/2K/4K 只在比例尺寸下生效。">
-        清晰度
-        <select value={settings.resolution} onChange={(e) => setSettings({ resolution: e.target.value })}>
-          {['1K', '2K', '4K'].map((i) => <option key={i}>{i}</option>)}
-        </select>
-      </label>
+      <div className="size-block">
+        <div className="size-block-head">
+          <strong>图像尺寸</strong>
+          <span>当前 {previewLabel}</span>
+        </div>
+        <div className="size-grid">
+          {IMAGE_RATIO_PRESETS.map((ratio) => (
+            <button
+              key={ratio}
+              type="button"
+              className={selectedRatio === ratio ? 'active' : ''}
+              onClick={() => {
+                setSettings({ size: imageSizeFromRatio(ratio, settings.resolution) })
+              }}
+            >
+              {ratio}
+            </button>
+          ))}
+        </div>
+        <div className="size-grid size-resolution-grid">
+          {IMAGE_RESOLUTION_PRESETS.map((resolution) => (
+            <button
+              key={resolution}
+              type="button"
+              className={settings.resolution === resolution ? 'active' : ''}
+              onClick={() => {
+                setSettings({
+                  resolution,
+                  size: isCustomSize
+                    ? normalizeImageSize(`${customWidth}x${customHeight}`, resolution)
+                    : imageSizeFromRatio(selectedRatio, resolution),
+                })
+              }}
+            >
+              {resolution}
+            </button>
+          ))}
+        </div>
+        <div className="custom-size-row">
+          <label>
+            宽
+            <input
+              type="number"
+              min={64}
+              max={4096}
+              step={16}
+              value={customWidth}
+              onChange={(e) => {
+                const width = Number(e.target.value)
+                setCustomWidth(width)
+                setSettings({ size: normalizeImageSize(`${width}x${customHeight}`, settings.resolution) })
+              }}
+            />
+          </label>
+          <span className="custom-size-sep">x</span>
+          <label>
+            高
+            <input
+              type="number"
+              min={64}
+              max={4096}
+              step={16}
+              value={customHeight}
+              onChange={(e) => {
+                const height = Number(e.target.value)
+                setCustomHeight(height)
+                setSettings({ size: normalizeImageSize(`${customWidth}x${height}`, settings.resolution) })
+              }}
+            />
+          </label>
+        </div>
+      </div>
       <label title="high 约为 medium 的 4 倍成本。">
         质量
         <select value={settings.quality} onChange={(e) => setSettings({ quality: e.target.value })}>
           {['low', 'medium', 'high'].map((i) => <option key={i} value={i}>{localizeQuality(locale, i)}</option>)}
         </select>
-      </label>
-      <label title="每张输出独立计费。">
-        数量
-        <input type="number" min={1} max={4} value={settings.count} onChange={(e) => setSettings({ count: Number(e.target.value) })} />
       </label>
     </div>
   )
@@ -808,14 +975,14 @@ export function PlanConfirmDialog({ plan, settings, onAccept, onKeepMine, onCopy
               <div className="plan-confirm-comparison">
                 <div className="plan-confirm-side">
                   <h4>你的参数</h4>
-                  <div className="param-row"><span>比例</span><span>{settings.size}</span></div>
+                  <div className="param-row"><span>尺寸</span><span>{imageSizeLabel(settings.size)}</span></div>
                   <div className="param-row"><span>清晰度</span><span>{settings.resolution}</span></div>
                   <div className="param-row"><span>质量</span><span>{localizeQuality(locale, settings.quality)}</span></div>
                   <div className="param-row"><span>数量</span><span>{settings.count}</span></div>
                 </div>
                 <div className="plan-confirm-side">
                   <h4>AI 建议</h4>
-                  <div className="param-row"><span>比例</span><span>{plan.size}</span></div>
+                  <div className="param-row"><span>尺寸</span><span>{imageSizeLabel(plan.size)}</span></div>
                   <div className="param-row"><span>清晰度</span><span>{plan.resolution}</span></div>
                   <div className="param-row"><span>质量</span><span>{localizeQuality(locale, plan.quality)}</span></div>
                   <div className="param-row"><span>数量</span><span>{plan.count}</span></div>
@@ -945,4 +1112,3 @@ function initialsFor(name: string) {
   if (parts.length > 1) return parts.slice(0, 2).map((p) => p[0]).join('').toUpperCase()
   return Array.from(trimmed).slice(0, 2).join('').toUpperCase()
 }
-

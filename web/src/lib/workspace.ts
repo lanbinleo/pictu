@@ -66,6 +66,76 @@ export type CanvasDragState =
 export const NEW_CONVERSATION_DRAFT_PREFIX = 'pictu-new-conversation-draft:'
 export const defaultRemoveBackgroundPrompt = 'Remove the background from the selected image. Keep the subject unchanged, preserve edges and fine details, and output a transparent PNG.'
 
+export const IMAGE_RATIO_PRESETS = ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'] as const
+export const IMAGE_RESOLUTION_PRESETS = ['1K', '2K', '4K'] as const
+
+const RESOLUTION_BASE_SIZES: Record<(typeof IMAGE_RESOLUTION_PRESETS)[number], number> = {
+  '1K': 1024,
+  '2K': 2048,
+  '4K': 4096,
+}
+
+function clampSizeDimension(value: number) {
+  return clamp(Math.round(value / 16) * 16, 64, 4096)
+}
+
+export function parseImageSize(value: string) {
+  const match = value.trim().match(/^(\d+)\s*[x×]\s*(\d+)$/i)
+  if (!match) return null
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  return { width: clampSizeDimension(width), height: clampSizeDimension(height) }
+}
+
+export function imageSizeFromRatio(ratio: string, resolution: string) {
+  const base = RESOLUTION_BASE_SIZES[resolution as keyof typeof RESOLUTION_BASE_SIZES] ?? RESOLUTION_BASE_SIZES['1K']
+  if (!ratio || ratio === 'auto') return `${base}x${base}`
+  const [widthRaw, heightRaw] = ratio.split(':').map((part) => Number(part))
+  const width = Number.isFinite(widthRaw) && widthRaw > 0 ? widthRaw : 1
+  const height = Number.isFinite(heightRaw) && heightRaw > 0 ? heightRaw : 1
+  if (width >= height) return `${base}x${clampSizeDimension((base * height) / width)}`
+  return `${clampSizeDimension((base * width) / height)}x${base}`
+}
+
+export function normalizeImageSize(size: string, resolution: string) {
+  const parsed = parseImageSize(size)
+  if (parsed) return `${parsed.width}x${parsed.height}`
+  return imageSizeFromRatio(size, resolution)
+}
+
+export function imageRatioFromSize(size: string) {
+  const parsed = parseImageSize(size)
+  if (!parsed) return '1:1'
+  const current = parsed.width / parsed.height
+  const ratios = [
+    ['1:1', 1],
+    ['2:3', 2 / 3],
+    ['3:2', 3 / 2],
+    ['3:4', 3 / 4],
+    ['4:3', 4 / 3],
+    ['9:16', 9 / 16],
+    ['16:9', 16 / 9],
+    ['21:9', 21 / 9],
+  ] as const
+  return ratios.reduce((best, item) => (Math.abs(item[1] - current) < Math.abs(best[1] - current) ? item : best), ratios[0])[0]
+}
+
+export function imageSizeLabel(size: string) {
+  const parsed = parseImageSize(size)
+  if (!parsed) return size
+  return `${parsed.width}×${parsed.height}`
+}
+
+export function normalizeGenerationSettings(settings: GenerationSettingsValue): GenerationSettingsValue {
+  return {
+    size: normalizeImageSize(settings.size, settings.resolution),
+    resolution: IMAGE_RESOLUTION_PRESETS.includes(settings.resolution as (typeof IMAGE_RESOLUTION_PRESETS)[number]) ? settings.resolution : '1K',
+    quality: ['low', 'medium', 'high'].includes(settings.quality) ? settings.quality : 'medium',
+    count: clamp(Number.isFinite(settings.count) ? settings.count : 1, 1, 4),
+  }
+}
+
 const COMMAND_PATTERNS: Record<string, RegExp> = {
   size: /--(?:ar|size)\s+([\w:]+)/i,
   resolution: /--(?:res|resolution)\s+(\w+)/i,

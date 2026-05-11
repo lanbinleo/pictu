@@ -993,43 +993,88 @@ pre {
 
 /* ── Settings popover (from composer) ── */
 
-.settings-popover {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 10px);
-  z-index: 8;
-  width: min(340px, calc(100vw - 36px));
-  max-height: min(520px, calc(100dvh - 36px));
+.settings-controls {
   display: grid;
-  gap: 12px;
-  border-radius: 12px;
-  background: var(--panel);
-  box-shadow: 0px 0px 0px 1px var(--border), 0 12px 32px rgba(20, 20, 19, 0.14);
-  padding: 14px;
-  animation: modal-pop 0.14s ease both;
-  overflow-y: auto;
+  gap: 10px;
 }
 
-.settings-popover-head {
+.settings-panel {
+  width: min(760px, 100%);
+}
+
+.settings-panel-body {
+  gap: 14px;
+}
+
+.size-block {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--bg);
+  box-shadow: var(--ring);
+}
+
+.size-block-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
   gap: 10px;
 }
 
-.settings-popover-head strong {
-  font-size: 0.92rem;
+.size-block-head strong {
+  font-size: 0.95rem;
 }
 
-.settings-popover .icon-button {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
+.size-block-head span {
+  color: var(--soft);
+  font-size: 0.8rem;
 }
 
-.settings-controls {
+.size-grid {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.size-grid button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  box-shadow: var(--ring);
+}
+
+.size-grid button.active {
+  color: #faf9f5;
+  background: var(--accent);
+  box-shadow: 0px 0px 0px 1px var(--accent);
+}
+
+.size-resolution-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.custom-size-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+}
+
+.custom-size-row label {
+  min-width: 0;
+}
+
+.custom-size-sep {
+  color: var(--soft);
+  padding-bottom: 12px;
+  font-size: 0.9rem;
+}
+
+.custom-size-row input {
+  min-width: 0;
 }
 
 .param-tags {
@@ -1122,12 +1167,57 @@ pre {
   animation: modal-pop 0.16s ease both;
 }
 
-.image-provider-popover {
+.composer-menu-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.provider-menu-label {
+  max-width: 96px;
+  overflow: hidden;
+  color: var(--soft);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.provider-menu-button,
+.count-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  padding: 0 4px;
+  box-shadow: none;
+}
+
+.provider-menu-button:hover,
+.count-menu-button:hover {
+  background: transparent;
+  color: var(--accent);
+}
+
+.provider-menu-button svg,
+.count-menu-button svg {
+  flex: 0 0 auto;
+}
+
+.image-provider-popover,
+.count-popover {
   position: absolute;
   right: 0;
   bottom: calc(100% + 10px);
   z-index: 8;
-  width: min(220px, calc(100vw - 36px));
   display: grid;
   gap: 10px;
   border-radius: 12px;
@@ -1135,6 +1225,14 @@ pre {
   box-shadow: 0px 0px 0px 1px var(--border), 0 12px 32px rgba(20, 20, 19, 0.14);
   padding: 12px;
   animation: modal-pop 0.14s ease both;
+}
+
+.image-provider-popover {
+  width: min(240px, calc(100vw - 36px));
+}
+
+.count-popover {
+  width: min(200px, calc(100vw - 36px));
 }
 
 .image-provider-popover-head {
@@ -1189,6 +1287,55 @@ pre {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.count-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.count-popover-head strong {
+  font-size: 0.92rem;
+}
+
+.count-popover .icon-button {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+}
+
+.count-popover-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.count-popover-grid button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  box-shadow: var(--ring);
+}
+
+.count-popover-grid button.active {
+  color: #faf9f5;
+  background: var(--accent);
+  box-shadow: 0px 0px 0px 1px var(--accent);
+}
+
+.count-popover-input {
+  display: grid;
+  gap: 6px;
+  color: var(--soft);
+  font-size: 0.78rem;
+}
+
+.count-popover-input input {
+  min-width: 0;
 }
 
 .asset-gallery-head,
@@ -1259,15 +1406,15 @@ pre {
   color: var(--soft);
 }
 
-.composer.centered .settings-popover,
-.composer.centered .asset-gallery-popover,
-.composer.centered .image-provider-popover {
+.composer.centered .asset-gallery-popover {
   top: calc(100% + 10px);
   bottom: auto;
 }
 
-.provider-menu-button {
-  position: relative;
+.composer.centered .composer-menu-wrap .image-provider-popover,
+.composer.centered .composer-menu-wrap .count-popover {
+  top: calc(100% + 10px);
+  bottom: auto;
 }
 
 /* ── Asset grid & tiles ── */
@@ -2869,9 +3016,28 @@ pre {
     flex-basis: 38px;
   }
 
-  .provider-menu-button {
-    width: 38px;
-    flex-basis: 38px;
+  .provider-menu-label { max-width: 70px; }
+
+  .provider-menu-button,
+  .count-menu-button {
+    min-height: 32px;
+    padding-inline: 2px;
+  }
+
+  .size-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .size-resolution-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .custom-size-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .custom-size-sep {
+    display: none;
   }
 
   .planner-switch {

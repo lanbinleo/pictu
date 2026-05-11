@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import type { Asset, RuntimeSettings, SessionDetail } from '../types/api'
 import { EditableTitle } from '../components/workspace'
-import { assetImageSrc, canvasNodesFromDetail, clamp, defaultRemoveBackgroundPrompt, dimensionsForImage, dimensionsForRatio, emptyCanvasState, mergeCanvasState, nodeFromAsset, parseCanvasState, ratioFromNode, rectFromPoints, rectIntersectsNode, removeBackgroundFromURL, screenRectToWorld, toggleSelection, uniqueAssets, uniqueNumbers, upsertCanvasNode, type CanvasDragState, type CanvasNode, type CanvasState } from '../lib/workspace'
+import { assetImageSrc, canvasNodesFromDetail, clamp, defaultRemoveBackgroundPrompt, dimensionsForImage, dimensionsForRatio, emptyCanvasState, mergeCanvasState, nodeFromAsset, normalizeImageSize, parseCanvasState, ratioFromNode, rectFromPoints, rectIntersectsNode, removeBackgroundFromURL, screenRectToWorld, toggleSelection, uniqueAssets, uniqueNumbers, upsertCanvasNode, type CanvasDragState, type CanvasNode, type CanvasState } from '../lib/workspace'
 
 export function CanvasPage({ detail, sessionId, runtimeSettings, onChanged, onRename, onOpenMenu }: {
   detail: SessionDetail | null
@@ -181,7 +181,7 @@ export function CanvasPage({ detail, sessionId, runtimeSettings, onChanged, onRe
       await api.generate(sessionId, {
         message: text,
         asset_ids: assetIDs,
-        size: selected?.ratio || settings.size,
+        size: normalizeImageSize(selected?.ratio || settings.size, settings.resolution),
         resolution: settings.resolution,
         quality: settings.quality,
         count: settings.count,

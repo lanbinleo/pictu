@@ -483,11 +483,12 @@ func TitleFromPrompt(text string, date time.Time) string {
 
 func normalizeInput(input PlanInput) PlanInput {
 	if input.Size == "" {
-		input.Size = "auto"
+		input.Size = "1024x1024"
 	}
 	if input.Resolution == "" {
 		input.Resolution = "1K"
 	}
+	input.Size = validSize(input.Size, "1024x1024", input.Resolution)
 	if input.Quality == "" {
 		input.Quality = "medium"
 	}
@@ -505,8 +506,8 @@ func sanitizePlan(plan GenerationPlan, input PlanInput) GenerationPlan {
 	if plan.Prompt == "" {
 		plan.Prompt = BuildPlan(input).Prompt
 	}
-	plan.Size = validSize(plan.Size, input.Size)
 	plan.Resolution = validEnum(plan.Resolution, input.Resolution, []string{"1K", "2K", "4K"})
+	plan.Size = validSize(plan.Size, input.Size, plan.Resolution)
 	plan.Quality = validEnum(plan.Quality, input.Quality, []string{"low", "medium", "high"})
 	if plan.Count <= 0 {
 		plan.Count = input.Count
@@ -541,7 +542,7 @@ func userPlanningPrompt(input PlanInput) string {
 	b.WriteString("CURRENT SETTINGS (reference baseline; you may adjust if the request benefits from it):\n")
 	b.WriteString(fmt.Sprintf("- size: %s\n- resolution: %s\n- quality: %s\n- count: %d\n", input.Size, input.Resolution, input.Quality, input.Count))
 	b.WriteString("AVAILABLE TOOL PARAMETER VALUES:\n")
-	b.WriteString("- size: auto, 1:1, 1:2, 2:1, 1:3, 3:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 9:21, 21:9, or explicit pixels like 1024x1024\n")
+	b.WriteString("- size: explicit pixels like 1024x1024, 1024x1536, 1536x1024, 1344x1792. Keep both sides as multiples of 16.\n")
 	b.WriteString("- resolution: 1K, 2K, 4K\n")
 	b.WriteString("- quality: low, medium, high\n")
 	b.WriteString("- count: integer 1 to 4\n")
@@ -592,7 +593,7 @@ func generateImageTool() toolDef {
 					},
 					"size": map[string]any{
 						"type":        "string",
-						"description": "Selected output size. Use current setting as a reference, but choose the best value for the request. Allowed ratios: auto, 1:1, 1:2, 2:1, 1:3, 3:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 9:21, 21:9. Explicit pixels like 1024x1024 are also allowed.",
+						"description": "Selected output size in pixels, such as 1024x1024, 1024x1536, or 1536x1024. Keep both dimensions as multiples of 16.",
 					},
 					"resolution": map[string]any{
 						"type":        "string",
@@ -664,18 +665,18 @@ func validEnum(value, fallback string, allowed []string) string {
 	return fallback
 }
 
-func validSize(value, fallback string) string {
-	if value == "" {
-		return fallback
+func validSize(value, fallback, resolution string) string {
+	if normalized, ok := normalizePixelSize(value); ok {
+		return normalized
 	}
-	allowed := []string{"auto", "1:1", "1:2", "2:1", "1:3", "3:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "9:21", "21:9"}
-	for _, item := range allowed {
-		if value == item {
-			return value
-		}
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return rightCodesImageSize(trimmed, resolution)
 	}
-	if strings.Contains(value, "x") || strings.Contains(value, "×") {
-		return value
+	if normalized, ok := normalizePixelSize(fallback); ok {
+		return normalized
 	}
-	return fallback
+	if trimmed := strings.TrimSpace(fallback); trimmed != "" {
+		return rightCodesImageSize(trimmed, resolution)
+	}
+	return rightCodesImageSize("auto", resolution)
 }

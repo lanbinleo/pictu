@@ -41,9 +41,6 @@ func createRightCodesImageTask(ctx context.Context, provider RuntimeImageProvide
 	if body.Model == "" {
 		body.Model = "gpt-image-2"
 	}
-	if body.Model == "gpt-image-2" {
-		body.Size = "1024x1024"
-	}
 	if body.N <= 0 {
 		body.N = 1
 	}
@@ -132,6 +129,9 @@ type rightCodesImageResponse struct {
 }
 
 func rightCodesImageSize(size, resolution string) string {
+	if normalized, ok := normalizePixelSize(size); ok {
+		return normalized
+	}
 	base := 1024
 	switch strings.ToUpper(strings.TrimSpace(resolution)) {
 	case "2K":
@@ -153,29 +153,57 @@ func rightCodesImageSize(size, resolution string) string {
 		return fmt.Sprintf("%dx%d", base, base)
 	}
 	if w >= h {
-		height := roundToMultiple(float64(base) * (h / w))
+		height := roundToMultipleFloat(float64(base)*(h/w), 16)
 		if height <= 0 {
 			height = base
 		}
 		return fmt.Sprintf("%dx%d", base, height)
 	}
-	width := roundToMultiple(float64(base) * (w / h))
+	width := roundToMultipleFloat(float64(base)*(w/h), 16)
 	if width <= 0 {
 		width = base
 	}
 	return fmt.Sprintf("%dx%d", width, base)
 }
 
-func roundToMultiple(v float64) int {
-	n := int(v + 0.5)
-	if n < 64 {
+func normalizePixelSize(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", false
+	}
+	parts := strings.FieldsFunc(trimmed, func(r rune) bool { return r == 'x' || r == 'X' || r == '×' })
+	if len(parts) != 2 {
+		return "", false
+	}
+	width, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || width <= 0 || height <= 0 {
+		return "", false
+	}
+	return fmt.Sprintf("%dx%d", roundToMultiple(width, 16), roundToMultiple(height, 16)), true
+}
+
+func roundToMultiple(value, multiple int) int {
+	if multiple <= 0 {
+		multiple = 16
+	}
+	if value < 64 {
 		return 64
 	}
-	remainder := n % 64
+	remainder := value % multiple
 	if remainder == 0 {
-		return n
+		return value
 	}
-	return n - remainder
+	lower := value - remainder
+	upper := lower + multiple
+	if value-lower < upper-value {
+		return lower
+	}
+	return upper
+}
+
+func roundToMultipleFloat(value float64, multiple int) int {
+	return roundToMultiple(int(value+0.5), multiple)
 }
 
 func parseFloat(value string) (float64, error) {

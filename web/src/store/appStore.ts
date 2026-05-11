@@ -48,7 +48,7 @@ export const useAppStore = create<AppState>()(
       draft: '',
       selectedAssetIds: [],
       settings: {
-        size: 'auto',
+        size: '1024x1024',
         resolution: '1K',
         quality: 'medium',
         count: 1,
