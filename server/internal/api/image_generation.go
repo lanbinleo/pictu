@@ -153,17 +153,17 @@ func rightCodesImageSize(size, resolution string) string {
 		return fmt.Sprintf("%dx%d", base, base)
 	}
 	if w >= h {
-		height := roundToMultipleFloat(float64(base)*(h/w), 16)
-		if height <= 0 {
-			height = base
+		width := roundToMultipleFloat(float64(base)*(w/h), 16)
+		if width <= 0 {
+			width = base
 		}
-		return fmt.Sprintf("%dx%d", base, height)
+		return fmt.Sprintf("%dx%d", width, base)
 	}
-	width := roundToMultipleFloat(float64(base)*(w/h), 16)
-	if width <= 0 {
-		width = base
+	height := roundToMultipleFloat(float64(base)*(h/w), 16)
+	if height <= 0 {
+		height = base
 	}
-	return fmt.Sprintf("%dx%d", width, base)
+	return fmt.Sprintf("%dx%d", base, height)
 }
 
 func normalizePixelSize(value string) (string, bool) {

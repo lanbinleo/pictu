@@ -3,7 +3,6 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Archive,
-  Camera,
   Check,
   ChevronDown,
   ChevronUp,
@@ -37,6 +36,7 @@ import {
   imageRatioFromSize,
   imageSizeFromRatio,
   imageSizeLabel,
+  imageTileShape,
   NEW_CONVERSATION_DRAFT_PREFIX,
   parseCommands,
   normalizeGenerationSettings,
@@ -348,6 +348,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     if (galleryPreview) return
     function handleClick(event: MouseEvent) {
       if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
+        setSettingsOpen(false)
         setAssetGalleryOpen(false)
         setImageProviderOpen(false)
         setCountMenuOpen(false)
@@ -594,6 +595,12 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
             <button type="button" className="icon-button" onClick={openSettings} title={`生成参数：${selectedImageSizeLabel}`}>
               <SlidersHorizontal size={18} />
             </button>
+            {settingsOpen && (
+              <SettingsPopover settings={settings} setSettings={setSettings}
+                runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
+                plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel}
+                onClose={() => setSettingsOpen(false)} />
+            )}
             {assetGalleryOpen && (
               <AssetGalleryPopover
                 assets={galleryAssets} selectedAssetIds={selectedAssetIds} uploadProvider={uploadProvider} setUploadProvider={setUploadProvider}
@@ -617,7 +624,6 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
                 onClick={openImageProviderMenu}
                 title={`图片 provider${selectedImageProviderLabel ? `：${selectedImageProviderLabel}` : ''}`}
               >
-                <Camera size={16} />
                 <ChevronDown size={14} />
               </button>
               {imageProviderOpen && (
@@ -662,12 +668,6 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
           settings={settings} setSettings={setSettings} usePlanner={usePlanner} setUsePlanner={setUsePlanner}
           onClose={() => setMobileToolsOpen(false)} onUpload={() => { setMobileToolsOpen(false); setAssetGalleryOpen(true); loadAssetGallery() }} />
       )}
-      {settingsOpen && (
-        <SettingsPopover settings={settings} setSettings={setSettings}
-          runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
-          plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel}
-          onClose={() => setSettingsOpen(false)} />
-      )}
       {galleryPreview && <ImageLightbox src={galleryPreview} onClose={() => setGalleryPreview(null)} />}
       {pendingRequest?.response.requires_confirmation && (
         <PlanConfirmDialog
@@ -699,30 +699,28 @@ export function SettingsPopover({ settings, setSettings, runtimeSettings, planne
   const plannerProviders = runtimeSettings?.llm_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
   const selectedPlannerId = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
   return (
-    <div className="overlay" onClick={onClose}>
-      <section className="overlay-panel settings-panel" onClick={(e) => e.stopPropagation()}>
-        <header>
-          <h2>生成参数</h2>
-          <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
-        </header>
-        <div className="overlay-body settings-panel-body">
-          <SettingsControls settings={settings} setSettings={setSettings} />
-          {runtimeSettings && (
-            <div className="settings-controls planner-settings-controls">
-              <label>
-                Planner 模型
-                <select value={selectedPlannerId} onChange={(e) => {
-                  const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
-                  setPlannerProvider(e.target.value)
-                  setPlannerModel(next?.planner_model || '')
-                }}>
-                  {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
-                </select>
-              </label>
-            </div>
-          )}
-        </div>
-      </section>
+    <div className="settings-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="settings-popover-head">
+        <strong>生成参数</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+      </div>
+      <div className="settings-popover-body">
+        <SettingsControls settings={settings} setSettings={setSettings} />
+        {runtimeSettings && (
+          <div className="settings-controls planner-settings-controls">
+            <label>
+              Planner 模型
+              <select value={selectedPlannerId} onChange={(e) => {
+                const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
+                setPlannerProvider(e.target.value)
+                setPlannerModel(next?.planner_model || '')
+              }}>
+                {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -870,8 +868,10 @@ export function SettingsControls({ settings, setSettings }: { settings: Generati
               value={customWidth}
               onChange={(e) => {
                 const width = Number(e.target.value)
-                setCustomWidth(width)
-                setSettings({ size: normalizeImageSize(`${width}x${customHeight}`, settings.resolution) })
+                if (!Number.isFinite(width) || width <= 0) return
+                const snapped = Math.max(64, Math.min(4096, Math.round(width / 16) * 16))
+                setCustomWidth(snapped)
+                setSettings({ size: normalizeImageSize(`${snapped}x${customHeight}`, settings.resolution) })
               }}
             />
           </label>
@@ -886,8 +886,10 @@ export function SettingsControls({ settings, setSettings }: { settings: Generati
               value={customHeight}
               onChange={(e) => {
                 const height = Number(e.target.value)
-                setCustomHeight(height)
-                setSettings({ size: normalizeImageSize(`${customWidth}x${height}`, settings.resolution) })
+                if (!Number.isFinite(height) || height <= 0) return
+                const snapped = Math.max(64, Math.min(4096, Math.round(height / 16) * 16))
+                setCustomHeight(snapped)
+                setSettings({ size: normalizeImageSize(`${customWidth}x${snapped}`, settings.resolution) })
               }}
             />
           </label>
@@ -916,6 +918,7 @@ export function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, 
   onPreview: (a: Asset) => void
   onClose: () => void
 }) {
+  const [tileShapes, setTileShapes] = useState<Record<number, 'square' | 'portrait' | 'landscape'>>({})
   return (
     <div className="asset-gallery-popover" onClick={(e) => e.stopPropagation()}>
       <div className="asset-gallery-head">
@@ -935,8 +938,15 @@ export function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, 
           {uploading ? <Loader2 className="spin" size={20} /> : <ImagePlus size={20} />}
         </button>
         {assets.map((asset) => (
-          <div key={asset.id} className={`asset-tile compact ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} title={asset.file_name}>
-            <img src={assetImageSrc(asset)} alt={asset.file_name} />
+          <div key={asset.id} className={`asset-tile compact shape-${tileShapes[asset.id] ?? 'square'} ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`} title={asset.file_name}>
+            <img
+              src={assetImageSrc(asset)}
+              alt={asset.file_name}
+              onLoad={(event) => {
+                const { naturalWidth, naturalHeight } = event.currentTarget
+                setTileShapes((current) => ({ ...current, [asset.id]: imageTileShape(naturalWidth, naturalHeight) }))
+              }}
+            />
             <button className="asset-use" type="button" onClick={() => onUse(asset)} title="使用">
               {selectedAssetIds.includes(asset.id) ? '已用' : '使用'}
             </button>

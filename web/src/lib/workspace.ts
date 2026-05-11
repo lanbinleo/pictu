@@ -94,8 +94,8 @@ export function imageSizeFromRatio(ratio: string, resolution: string) {
   const [widthRaw, heightRaw] = ratio.split(':').map((part) => Number(part))
   const width = Number.isFinite(widthRaw) && widthRaw > 0 ? widthRaw : 1
   const height = Number.isFinite(heightRaw) && heightRaw > 0 ? heightRaw : 1
-  if (width >= height) return `${base}x${clampSizeDimension((base * height) / width)}`
-  return `${clampSizeDimension((base * width) / height)}x${base}`
+  if (width >= height) return `${clampSizeDimension((base * width) / height)}x${base}`
+  return `${base}x${clampSizeDimension((base * height) / width)}`
 }
 
 export function normalizeImageSize(size: string, resolution: string) {
@@ -125,6 +125,14 @@ export function imageSizeLabel(size: string) {
   const parsed = parseImageSize(size)
   if (!parsed) return size
   return `${parsed.width}×${parsed.height}`
+}
+
+export function imageTileShape(width: number, height: number) {
+  if (!width || !height) return 'square'
+  const ratio = width / height
+  if (ratio >= 1.2) return 'landscape'
+  if (ratio <= 0.83) return 'portrait'
+  return 'square'
 }
 
 export function normalizeGenerationSettings(settings: GenerationSettingsValue): GenerationSettingsValue {

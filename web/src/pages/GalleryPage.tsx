@@ -4,7 +4,7 @@ import { api } from '../lib/api'
 import { useAppStore } from '../store/appStore'
 import type { Asset, RuntimeSettings, UsageResponse } from '../types/api'
 import { ImageLightbox } from '../components/workspace'
-import { assetImageSrc, galleryItemsFromUsage } from '../lib/workspace'
+import { assetImageSrc, galleryItemsFromUsage, imageTileShape } from '../lib/workspace'
 
 export function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSettings }: { activeSessionId: number | null; onSessionsChanged: () => void | Promise<void>; runtimeSettings: RuntimeSettings | null }) {
   const [data, setData] = useState<UsageResponse | null>(null)
@@ -17,6 +17,7 @@ export function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSetting
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [tileShapes, setTileShapes] = useState<Record<string, 'square' | 'portrait' | 'landscape'>>({})
   const allGalleryItems = useMemo(() => galleryItemsFromUsage(data), [data])
   const galleryItems = useMemo(() => {
     if (filter === 'generated') return allGalleryItems.filter((item) => item.generated)
@@ -109,8 +110,16 @@ export function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSetting
         <div className={`gallery-masonry ${galleryItems.length === 0 ? 'is-empty' : ''}`}>
           {galleryItems.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
           {galleryItems.map((item) => (
-            <div key={item.id} className="asset-tile gallery-tile" title={item.title}>
-              <img src={item.url} alt={item.title} loading="lazy" />
+            <div key={item.id} className={`asset-tile gallery-tile shape-${tileShapes[item.id] ?? 'square'}`} title={item.title}>
+              <img
+                src={item.url}
+                alt={item.title}
+                loading="lazy"
+                onLoad={(event) => {
+                  const { naturalWidth, naturalHeight } = event.currentTarget
+                  setTileShapes((current) => ({ ...current, [item.id]: imageTileShape(naturalWidth, naturalHeight) }))
+                }}
+              />
               <span className="asset-provider-badge">{item.provider}</span>
               {item.kind === 'asset' && <button className="asset-use" type="button" onClick={() => useAsset(item.asset)} title="使用">使用</button>}
               {item.kind === 'asset' && <button className="asset-delete" type="button" onClick={() => deleteAsset(item.asset)} title="删除"><X size={14} /></button>}
