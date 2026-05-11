@@ -1814,6 +1814,7 @@ pre {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 16px;
+  overflow: hidden;
 }
 
 .gallery-toolbar {
@@ -1857,8 +1858,10 @@ pre {
 
 .gallery-masonry {
   min-height: 0;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
   columns: 4;
   column-gap: 12px;
   padding-right: 6px;
@@ -1882,6 +1885,208 @@ pre {
   padding: 0;
   overflow: hidden;
   box-shadow: var(--ring);
+}
+
+/* ── Canvas page ── */
+
+.canvas-panel {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.canvas-topbar {
+  gap: 12px;
+}
+
+.canvas-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.canvas-zoom-controls .icon-button {
+  width: 34px;
+  height: 34px;
+  flex-basis: 34px;
+}
+
+.canvas-layout {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  border-top: 1px solid var(--border);
+}
+
+.canvas-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px),
+    var(--panel-2);
+  background-size: 48px 48px;
+  touch-action: none;
+}
+
+.canvas-grid {
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 4200px;
+  height: 4200px;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.canvas-node {
+  position: absolute;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 0 0 1px var(--border), 0 12px 28px rgba(20, 20, 19, 0.14);
+  overflow: hidden;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.canvas-node.selected {
+  box-shadow: 0 0 0 2px var(--accent), 0 14px 30px rgba(20, 20, 19, 0.16);
+}
+
+.canvas-node img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: contain;
+  background: var(--bg);
+}
+
+.canvas-node span {
+  min-height: 30px;
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.canvas-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: var(--soft);
+  text-align: center;
+  pointer-events: none;
+}
+
+.canvas-empty p {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.canvas-inspector {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 14px;
+  border-left: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.canvas-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.canvas-inspector-head strong {
+  font-size: 0.96rem;
+}
+
+.canvas-inspector-head .icon-button {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+}
+
+.canvas-tools {
+  display: grid;
+  gap: 9px;
+}
+
+.canvas-tools .secondary-button,
+.canvas-selected .primary-button,
+.canvas-selected .secondary-button {
+  width: 100%;
+}
+
+.canvas-library {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.canvas-library button {
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 0;
+  overflow: hidden;
+  box-shadow: var(--ring);
+}
+
+.canvas-library img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.canvas-selected {
+  display: grid;
+  gap: 12px;
+}
+
+.canvas-selected > img {
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--ring);
+}
+
+.canvas-selected .param-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.canvas-selected textarea {
+  min-height: 96px;
+}
+
+.canvas-action-stack {
+  display: grid;
+  gap: 8px;
 }
 
 .gallery-tile img {
@@ -2414,6 +2619,17 @@ pre {
     gap: 16px;
   }
 
+  .canvas-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .canvas-inspector {
+    max-height: 42vh;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+
   .settings-nav {
     flex-direction: row;
     flex-wrap: wrap;
@@ -2500,6 +2716,18 @@ pre {
 
   .gallery-actions { flex-wrap: wrap; }
   .gallery-actions label { width: 100%; }
+
+  .canvas-topbar {
+    flex-wrap: wrap;
+  }
+
+  .canvas-zoom-controls {
+    margin-left: auto;
+  }
+
+  .canvas-inspector {
+    padding: 12px;
+  }
 
   .ledger-list div {
     grid-template-columns: 1fr auto;

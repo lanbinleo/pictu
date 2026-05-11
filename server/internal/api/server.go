@@ -83,6 +83,7 @@ func (s *Server) routes() *gin.Engine {
 	protected.POST("/sessions", s.createSession)
 	protected.GET("/sessions/:id", s.getSession)
 	protected.PUT("/sessions/:id", s.updateSession)
+	protected.PUT("/sessions/:id/canvas", s.updateSessionCanvas)
 	protected.POST("/sessions/:id/archive", s.archiveSession)
 	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
 	protected.DELETE("/sessions/:id", s.deleteSession)
@@ -303,11 +304,35 @@ func (s *Server) listAllSessions(c *gin.Context) {
 func (s *Server) createSession(c *gin.Context) {
 	var req struct {
 		Title string `json:"title"`
+		Kind  string `json:"kind"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	session, err := s.store.CreateSession(c, currentUser(c), req.Title)
+	session, err := s.store.CreateSession(c, currentUser(c), req.Title, req.Kind)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+func (s *Server) updateSessionCanvas(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		CanvasState json.RawMessage `json:"canvas_state" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	if !json.Valid(req.CanvasState) {
+		fail(c, http.StatusBadRequest, "invalid canvas state")
+		return
+	}
+	session, err := s.store.UpdateSessionCanvasState(c, currentUser(c), id, string(req.CanvasState))
+	if err != nil {
+		statusFromErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"session": session})
@@ -872,7 +897,12 @@ func (s *Server) usage(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"summary": summary, "ledger": ledger, "assets": assets})
+	tasks, err := s.store.ListUserTasks(c, fresh, 100)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"summary": summary, "ledger": ledger, "assets": assets, "tasks": tasks})
 }
 
 func (s *Server) adminUsers(c *gin.Context) {

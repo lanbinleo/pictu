@@ -15,6 +15,8 @@ export type Session = {
   tenant_id: number
   user_id: number
   title: string
+  kind: 'chat' | 'canvas'
+  canvas_state?: string
   task_status?: '' | 'pending' | 'processing' | 'completed' | 'failed'
   created_at: string
   updated_at: string
@@ -91,6 +93,7 @@ export type UsageResponse = {
   summary: UsageSummary
   ledger: CreditLedger[] | null
   assets: Asset[] | null
+  tasks?: Task[] | null
 }
 
 export type GenerationPlan = {

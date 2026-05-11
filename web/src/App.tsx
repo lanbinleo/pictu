@@ -20,8 +20,11 @@ import {
   LogOut,
   Mail,
   MessageSquarePlus,
+  Minus,
+  Move,
   Moon,
   PanelLeft,
+  PanelRight,
   Pencil,
   ScrollText,
   Search,
@@ -37,6 +40,8 @@ import {
   Users,
   Wand2,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { api } from './lib/api'
 import { useAppStore } from './store/appStore'
@@ -57,6 +62,29 @@ type ToolDraft = {
   prompt: string
   raw: string
 }
+type CanvasNode = {
+  id: string
+  source: 'asset' | 'task' | 'local'
+  asset_id?: number
+  task_id?: number
+  image_index?: number
+  url: string
+  title: string
+  prompt?: string
+  x: number
+  y: number
+  w: number
+  h: number
+}
+type CanvasState = {
+  zoom: number
+  panX: number
+  panY: number
+  nodes: CanvasNode[]
+}
+type GalleryItem =
+  | { id: string; kind: 'asset'; asset: Asset; url: string; title: string; provider: string; created_at: string; generated: boolean }
+  | { id: string; kind: 'task'; task: Task; url: string; title: string; provider: string; created_at: string; generated: true }
 
 export function App() {
   const token = useAppStore((s) => s.token)
@@ -153,13 +181,16 @@ function Workspace() {
   const routePath = location.pathname
   const isNewRoute = routePath === '/new'
   const isChatRoute = routePath.startsWith('/chat/')
+  const isCanvasRoute = routePath.startsWith('/canvas/')
   const conversationId = isChatRoute ? routePath.slice('/chat/'.length).split('/')[0] ?? '' : ''
+  const canvasId = isCanvasRoute ? routePath.slice('/canvas/'.length).split('/')[0] ?? '' : ''
+  const routeSessionId = isChatRoute ? conversationId : isCanvasRoute ? canvasId : ''
   const isWorkspaceRoute = isNewRoute || isChatRoute
   const isSearchRoute = routePath === '/search'
   const isGalleryRoute = routePath === '/gallery'
   const isSettingsRoute = routePath === '/settings'
   const isAdminRoute = routePath === '/admin'
-  const isKnownRoute = isWorkspaceRoute || isSearchRoute || isGalleryRoute || isSettingsRoute || isAdminRoute
+  const isKnownRoute = isWorkspaceRoute || isCanvasRoute || isSearchRoute || isGalleryRoute || isSettingsRoute || isAdminRoute
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -178,8 +209,8 @@ function Workspace() {
       }
       return items
     })
-    if (isChatRoute) {
-      const session = items.find((item) => item.public_id === conversationId)
+    if (isChatRoute || isCanvasRoute) {
+      const session = items.find((item) => item.public_id === routeSessionId)
       if (session) {
         setError((current) => (current === '会话不存在' ? '' : current))
         if (activeSessionId !== session.id) setActiveSessionId(session.id)
@@ -216,13 +247,24 @@ function Workspace() {
   }
 
   async function createSession() {
-    const res = await api.createSession('未命名会话')
+    const res = await api.createSession('未命名会话', 'chat')
     const nextSessions = await api.listSessions().then((l) => l.sessions ?? []).catch(() => [res.session])
     setSessions(nextSessions)
     setActiveSessionId(res.session.id)
     setDetail({ session: res.session, assets: [], messages: [], tasks: [] })
     setMobilePanel(false)
     navigate(`/chat/${res.session.public_id}`, { replace: true })
+    return res.session
+  }
+
+  async function createCanvasSession() {
+    const res = await api.createSession('新建画布', 'canvas')
+    const nextSessions = await api.listSessions().then((l) => l.sessions ?? []).catch(() => [res.session])
+    setSessions(nextSessions)
+    setActiveSessionId(res.session.id)
+    setDetail({ session: res.session, assets: [], messages: [], tasks: [] })
+    setMobilePanel(false)
+    navigate(`/canvas/${res.session.public_id}`)
     return res.session
   }
 
@@ -241,7 +283,7 @@ function Workspace() {
       const next = nextSessions[0]
       setActiveSessionId(next?.id ?? null)
       setDetail(null)
-      navigate(next ? `/chat/${next.public_id}` : '/new', { replace: true })
+      navigate(next ? (next.kind === 'canvas' ? `/canvas/${next.public_id}` : `/chat/${next.public_id}`) : '/new', { replace: true })
     }
   }
 
@@ -256,7 +298,7 @@ function Workspace() {
   }, [])
 
   useEffect(() => {
-    if (isChatRoute && activeSessionId) {
+    if ((isChatRoute || isCanvasRoute) && activeSessionId) {
       refreshDetail(activeSessionId).catch((err) => setError(err.message))
       return
     }
@@ -264,14 +306,14 @@ function Workspace() {
       setActiveSessionId(null)
       setDetail(null)
     }
-  }, [activeSessionId, routePath, isChatRoute, isNewRoute])
+  }, [activeSessionId, routePath, isChatRoute, isCanvasRoute, isNewRoute])
 
   useEffect(() => {
-    if (!isChatRoute) return
-    const session = sessions.find((item) => item.public_id === conversationId)
+    if (!isChatRoute && !isCanvasRoute) return
+    const session = sessions.find((item) => item.public_id === routeSessionId)
     if (!session) return
     if (activeSessionId !== session.id) setActiveSessionId(session.id)
-  }, [conversationId, isChatRoute, sessions, activeSessionId])
+  }, [routeSessionId, isChatRoute, isCanvasRoute, sessions, activeSessionId])
 
   useEffect(() => {
     const running = (detail?.tasks ?? []).some((t) => t.status === 'pending' || t.status === 'processing')
@@ -323,7 +365,7 @@ function Workspace() {
       setCompletedNotices((c) => ({ ...c, [id]: false }))
     }
     setMobilePanel(false)
-    navigate(`/chat/${session.public_id}`)
+    navigate(session.kind === 'canvas' ? `/canvas/${session.public_id}` : `/chat/${session.public_id}`)
   }
 
   return (
@@ -342,6 +384,9 @@ function Workspace() {
           <button className="nav-item" onClick={() => navigate('/new')} title="新建对话">
             <MessageSquarePlus size={18} />{!leftCollapsed && <span>新建对话</span>}
           </button>
+          <button className="nav-item" onClick={() => createCanvasSession().catch((e) => setError(e.message))} title="新建画布">
+            <PanelRight size={18} />{!leftCollapsed && <span>新建画布</span>}
+          </button>
           <button className={`nav-item ${isSearchRoute ? 'active' : ''}`} onClick={() => navigate('/search')} title="搜索对话">
             <Search size={18} />{!leftCollapsed && <span>搜索</span>}
           </button>
@@ -354,7 +399,7 @@ function Workspace() {
           <div className="session-list">
             <div className="session-list-label">最近</div>
             {sessions.map((session) => (
-              <div key={session.id} className={`session-row ${session.id === activeSessionId && isChatRoute ? 'active' : ''}`}>
+              <div key={session.id} className={`session-row ${session.id === activeSessionId && (isChatRoute || isCanvasRoute) ? 'active' : ''}`}>
                 <button className="session-select" onClick={() => selectSession(session.id)} title={session.title}>
                   <SessionDot session={session} hasRequest={pendingRequest?.sessionId === session.id} completedNotice={completedNotices[session.id]} />
                   <span className="session-title">{session.title}</span>
@@ -417,6 +462,16 @@ function Workspace() {
         </section>
       )}
 
+      {isCanvasRoute && activeSessionId && (
+        <CanvasPage
+          detail={detail}
+          sessionId={activeSessionId}
+          runtimeSettings={runtimeSettings}
+          onChanged={refreshWorkspace}
+          onRename={renameSession}
+          onOpenMenu={() => setMobilePanel(true)}
+        />
+      )}
       {isGalleryRoute && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} runtimeSettings={runtimeSettings} />}
       {isSearchRoute && <ChatsPage sessions={sessions} onSelect={selectSession} onArchive={archiveSession} onRefresh={refreshSessions} />}
       {isSettingsRoute && <SettingsPage />}
@@ -1298,23 +1353,354 @@ function ChatsPage({ sessions, onSelect, onArchive, onRefresh }: {
   )
 }
 
+function CanvasPage({ detail, sessionId, runtimeSettings, onChanged, onRename, onOpenMenu }: {
+  detail: SessionDetail | null
+  sessionId: number
+  runtimeSettings: RuntimeSettings | null
+  onChanged: () => void | Promise<void>
+  onRename: (title: string) => Promise<void>
+  onOpenMenu: () => void
+}) {
+  const settings = useAppStore((s) => s.settings)
+  const uploadProvider = useAppStore((s) => s.uploadProvider)
+  const setUploadProvider = useAppStore((s) => s.setUploadProvider)
+  const [canvas, setCanvas] = useState<CanvasState>(emptyCanvasState())
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [promptDraft, setPromptDraft] = useState('')
+  const [removePrompt, setRemovePrompt] = useState(defaultRemoveBackgroundPrompt)
+  const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<{ type: 'node' | 'pan'; id?: string; startX: number; startY: number; x: number; y: number; panX: number; panY: number } | null>(null)
+  const saveTimerRef = useRef<number | null>(null)
+  const sessionRef = useRef<number | null>(null)
+  const canvasStateRef = useRef<string | undefined>(undefined)
+  const selected = canvas.nodes.find((node) => node.id === selectedId) ?? null
+  const imageProvider = runtimeSettings?.defaults.image_provider || ''
+
+  function queueSave(next: CanvasState) {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = window.setTimeout(() => {
+      api.updateSessionCanvas(sessionId, next).catch((err) => setError(err instanceof Error ? err.message : '画布保存失败'))
+    }, 450)
+  }
+
+  function updateCanvas(updater: (current: CanvasState) => CanvasState) {
+    setCanvas((current) => {
+      const next = updater(current)
+      queueSave(next)
+      return next
+    })
+  }
+
+  useEffect(() => {
+    const sources = canvasNodesFromDetail(detail)
+    const raw = detail?.session.canvas_state
+    setCanvas((current) => {
+      const changedSession = sessionRef.current !== sessionId
+      const changedState = canvasStateRef.current !== raw
+      sessionRef.current = sessionId
+      canvasStateRef.current = raw
+      if (changedSession || changedState) return mergeCanvasState(parseCanvasState(raw), sources)
+      return mergeCanvasState(current, sources)
+    })
+  }, [sessionId, detail?.session.canvas_state, detail?.assets, detail?.tasks])
+
+  useEffect(() => {
+    if (!selected) {
+      setPromptDraft('')
+      return
+    }
+    setPromptDraft(selected.prompt || '')
+  }, [selected?.id])
+
+  useEffect(() => () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
+  }, [])
+
+  async function loadLibrary() {
+    setLibraryOpen((open) => !open)
+    try {
+      const res = await api.listAssets()
+      setLibraryAssets(res.assets ?? [])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '图库加载失败')
+    }
+  }
+
+  async function uploadFiles(files: FileList | File[] | null) {
+    if (!files?.length) return
+    setUploading(true)
+    setError('')
+    try {
+      for (const file of Array.from(files)) {
+        if (!file.type.startsWith('image/')) continue
+        const res = await api.uploadAsset(sessionId, file, uploadProvider)
+        const node = nodeFromAsset(res.asset, canvas.nodes.length)
+        updateCanvas((current) => ({ ...current, nodes: upsertCanvasNode(current.nodes, node) }))
+      }
+      await onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '上传失败')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function addLibraryAsset(asset: Asset) {
+    setError('')
+    try {
+      const res = asset.session_id === sessionId ? { asset } : await api.useAsset(sessionId, asset.id)
+      const node = nodeFromAsset(res.asset, canvas.nodes.length)
+      updateCanvas((current) => ({ ...current, nodes: upsertCanvasNode(current.nodes, node) }))
+      await onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '添加图片失败')
+    }
+  }
+
+  function updateSelectedPrompt(value: string) {
+    setPromptDraft(value)
+    if (!selected) return
+    updateCanvas((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) => (node.id === selected.id ? { ...node, prompt: value } : node)),
+    }))
+  }
+
+  async function generateFromPrompt(prompt: string, assetIDs: number[]) {
+    const text = prompt.trim()
+    if (!text) {
+      setError('请先填写提示词')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      await api.generate(sessionId, {
+        message: text,
+        asset_ids: assetIDs,
+        size: settings.size,
+        resolution: settings.resolution,
+        quality: settings.quality,
+        count: settings.count,
+        use_planner: false,
+        image_provider: imageProvider,
+      })
+      await onChanged()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeBackgroundLocal() {
+    if (!selected) return
+    setBusy(true)
+    setError('')
+    try {
+      const dataURL = await removeBackgroundFromURL(selected.url)
+      const node: CanvasNode = {
+        ...selected,
+        id: `local-${Date.now()}`,
+        source: 'local',
+        asset_id: undefined,
+        task_id: undefined,
+        image_index: undefined,
+        url: dataURL,
+        title: `${selected.title} 去背景`,
+        x: selected.x + 36,
+        y: selected.y + 36,
+      }
+      updateCanvas((current) => ({ ...current, nodes: [node, ...current.nodes] }))
+      setSelectedId(node.id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '本地去背景失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget) return
+    dragRef.current = { type: 'pan', startX: event.clientX, startY: event.clientY, x: 0, y: 0, panX: canvas.panX, panY: canvas.panY }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setSelectedId(null)
+  }
+
+  function handleNodePointerDown(event: React.PointerEvent<HTMLDivElement>, node: CanvasNode) {
+    event.stopPropagation()
+    dragRef.current = { type: 'node', id: node.id, startX: event.clientX, startY: event.clientY, x: node.x, y: node.y, panX: canvas.panX, panY: canvas.panY }
+    stageRef.current?.setPointerCapture(event.pointerId)
+    setSelectedId(node.id)
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current
+    if (!drag) return
+    updateCanvas((current) => {
+      if (drag.type === 'pan') {
+        return { ...current, panX: drag.panX + event.clientX - drag.startX, panY: drag.panY + event.clientY - drag.startY }
+      }
+      const dx = (event.clientX - drag.startX) / current.zoom
+      const dy = (event.clientY - drag.startY) / current.zoom
+      return {
+        ...current,
+        nodes: current.nodes.map((node) => (node.id === drag.id ? { ...node, x: drag.x + dx, y: drag.y + dy } : node)),
+      }
+    })
+  }
+
+  function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    dragRef.current = null
+    if (stageRef.current?.hasPointerCapture(event.pointerId)) stageRef.current.releasePointerCapture(event.pointerId)
+  }
+
+  function zoomAt(event: React.WheelEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const nextZoom = clamp(canvas.zoom * (event.deltaY < 0 ? 1.08 : 0.92), 0.2, 3)
+    const worldX = (event.clientX - rect.left - canvas.panX) / canvas.zoom
+    const worldY = (event.clientY - rect.top - canvas.panY) / canvas.zoom
+    updateCanvas((current) => ({
+      ...current,
+      zoom: nextZoom,
+      panX: event.clientX - rect.left - worldX * nextZoom,
+      panY: event.clientY - rect.top - worldY * nextZoom,
+    }))
+  }
+
+  const selectedAssetIDs = selected?.asset_id ? [selected.asset_id] : []
+
+  return (
+    <section className="canvas-panel">
+      <header className="topbar canvas-topbar">
+        <button className="icon-button mobile-only" onClick={onOpenMenu} title="菜单"><PanelLeft size={18} /></button>
+        {detail?.session ? <EditableTitle title={detail.session.title} onSave={onRename} /> : <div className="title-line"><h1>新建画布</h1></div>}
+        <div className="canvas-zoom-controls">
+          <button className="icon-button" type="button" onClick={() => updateCanvas((c) => ({ ...c, zoom: clamp(c.zoom - 0.1, 0.2, 3) }))} title="缩小"><ZoomOut size={17} /></button>
+          <span>{Math.round(canvas.zoom * 100)}%</span>
+          <button className="icon-button" type="button" onClick={() => updateCanvas((c) => ({ ...c, zoom: clamp(c.zoom + 0.1, 0.2, 3) }))} title="放大"><ZoomIn size={17} /></button>
+        </div>
+      </header>
+      {error && <p className="inline-error">{error}</p>}
+      <div className="canvas-layout">
+        <div
+          ref={stageRef}
+          className="canvas-stage"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onWheel={zoomAt}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => { event.preventDefault(); uploadFiles(event.dataTransfer.files) }}
+        >
+          <div className="canvas-grid" style={{ transform: `translate(${canvas.panX}px, ${canvas.panY}px) scale(${canvas.zoom})` }}>
+            {canvas.nodes.map((node) => (
+              <div
+                key={node.id}
+                className={`canvas-node ${node.id === selectedId ? 'selected' : ''}`}
+                style={{ left: node.x, top: node.y, width: node.w, height: node.h }}
+                onPointerDown={(event) => handleNodePointerDown(event, node)}
+              >
+                <img src={node.url} alt={node.title} draggable={false} />
+                <span>{node.title}</span>
+              </div>
+            ))}
+          </div>
+          {canvas.nodes.length === 0 && (
+            <div className="canvas-empty">
+              <Move size={24} />
+              <p>把图片拖到这里，或从右侧添加图片</p>
+            </div>
+          )}
+        </div>
+        <aside className="canvas-inspector">
+          <div className="canvas-inspector-head">
+            <strong>{selected ? '图像信息' : '画布'}</strong>
+            <button className="icon-button" type="button" onClick={() => updateCanvas(() => emptyCanvasState())} title="清空画布"><Minus size={16} /></button>
+          </div>
+          <div className="canvas-tools">
+            <button className="secondary-button" type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+              {uploading ? <Loader2 className="spin" size={16} /> : <ImagePlus size={16} />}
+              上传图片
+            </button>
+            <button className="secondary-button" type="button" onClick={loadLibrary}>图库</button>
+            <label className="upload-destination-inline">
+              上传到
+              <select value={uploadProvider} onChange={(e) => setUploadProvider(e.target.value)}>
+                {(runtimeSettings?.upload_providers.filter((p) => p.enabled) ?? [{ id: 'evolink', name: 'Evolink' }, { id: 'maxqi', name: 'MaxQi' }]).map((p) => (
+                  <option key={p.id} value={p.id}>{p.name || p.id}</option>
+                ))}
+              </select>
+            </label>
+            <input ref={fileInputRef} className="hidden-file" type="file" accept="image/*" multiple onChange={(e) => { uploadFiles(e.target.files); e.currentTarget.value = '' }} />
+          </div>
+          {libraryOpen && (
+            <div className="canvas-library">
+              {libraryAssets.map((asset) => (
+                <button key={asset.id} type="button" onClick={() => addLibraryAsset(asset)} title={asset.file_name}>
+                  <img src={assetImageSrc(asset)} alt={asset.file_name} />
+                </button>
+              ))}
+              {libraryAssets.length === 0 && <p className="empty-note">图库里还没有图片</p>}
+            </div>
+          )}
+          {selected ? (
+            <div className="canvas-selected">
+              <img src={selected.url} alt={selected.title} />
+              <div className="param-row"><span>来源</span><span>{selected.source === 'asset' ? '参考图' : selected.source === 'task' ? '生成图' : '本地图'}</span></div>
+              <label>
+                提示词
+                <textarea value={promptDraft} onChange={(e) => updateSelectedPrompt(e.target.value)} placeholder="为这张图记录或修改提示词" />
+              </label>
+              <div className="canvas-action-stack">
+                <button className="primary-button" type="button" disabled={busy} onClick={() => generateFromPrompt(promptDraft, selectedAssetIDs)}>
+                  {busy ? <Loader2 className="spin" size={16} /> : <Wand2 size={16} />}
+                  创建新图片
+                </button>
+                <button className="secondary-button" type="button" disabled={busy} onClick={removeBackgroundLocal}>本地去背景</button>
+              </div>
+              <label>
+                AI 去背景提示词
+                <textarea value={removePrompt} onChange={(e) => setRemovePrompt(e.target.value)} />
+              </label>
+              <button className="secondary-button" type="button" disabled={busy} onClick={() => generateFromPrompt(removePrompt, selectedAssetIDs)}>AI 去背景</button>
+              {!selected.asset_id && <p className="empty-note">AI 去背景会使用提示词生成；生成图作为参考图复用还需要后续把任务结果保存成资产。</p>}
+            </div>
+          ) : (
+            <div className="canvas-selected empty">
+              <p className="empty-note">选择一张图片后，可以编辑提示词、创建新图片或去背景。</p>
+            </div>
+          )}
+        </aside>
+      </div>
+    </section>
+  )
+}
+
 function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSettings }: { activeSessionId: number | null; onSessionsChanged: () => void | Promise<void>; runtimeSettings: RuntimeSettings | null }) {
   const [data, setData] = useState<UsageResponse | null>(null)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
-  const [filter, setFilter] = useState<'all' | 'generated' | 'uploaded'>('all')
+  const [filter, setFilter] = useState<'all' | 'generated' | 'uploaded'>('generated')
   const selectAsset = useAppStore((s) => s.selectAsset)
   const deselectAsset = useAppStore((s) => s.deselectAsset)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const allAssets = useMemo(() => uniqueAssets(data?.assets ?? []), [data?.assets])
-  const galleryAssets = useMemo(() => {
-    if (filter === 'generated') return allAssets.filter(isGeneratedAsset)
-    if (filter === 'uploaded') return allAssets.filter((a) => !isGeneratedAsset(a))
-    return allAssets
-  }, [allAssets, filter])
+  const allGalleryItems = useMemo(() => galleryItemsFromUsage(data), [data])
+  const galleryItems = useMemo(() => {
+    if (filter === 'generated') return allGalleryItems.filter((item) => item.generated)
+    if (filter === 'uploaded') return allGalleryItems.filter((item) => item.kind === 'asset' && !item.generated)
+    return allGalleryItems
+  }, [allGalleryItems, filter])
 
   async function load() {
     const res = await api.usage()
@@ -1377,8 +1763,8 @@ function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSettings }: { 
       <div className="gallery-page">
         <div className="gallery-toolbar">
           <div className="gallery-filters">
-            <button type="button" className={filter === 'all' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('all')}>全部 ({allAssets.length})</button>
             <button type="button" className={filter === 'generated' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('generated')}>生成</button>
+            <button type="button" className={filter === 'all' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('all')}>全部 ({allGalleryItems.length})</button>
             <button type="button" className={filter === 'uploaded' ? 'filter-chip active' : 'filter-chip'} onClick={() => setFilter('uploaded')}>上传</button>
           </div>
           <div className="gallery-actions">
@@ -1398,15 +1784,15 @@ function GalleryPage({ activeSessionId, onSessionsChanged, runtimeSettings }: { 
           </div>
         </div>
         {error && <p className="form-error">{error}</p>}
-        <div className={`gallery-masonry ${galleryAssets.length === 0 ? 'is-empty' : ''}`}>
-          {galleryAssets.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
-          {galleryAssets.map((asset) => (
-            <div key={asset.id} className="asset-tile gallery-tile" title={asset.file_name}>
-              <img src={assetImageSrc(asset)} alt={asset.file_name} loading="lazy" />
-              <span className="asset-provider-badge">{providerLabel(asset)}</span>
-              <button className="asset-use" type="button" onClick={() => useAsset(asset)} title="使用">使用</button>
-              <button className="asset-delete" type="button" onClick={() => deleteAsset(asset)} title="删除"><X size={14} /></button>
-              <button className="asset-preview-hit" type="button" onClick={() => setPreview(assetImageSrc(asset))} title="预览" />
+        <div className={`gallery-masonry ${galleryItems.length === 0 ? 'is-empty' : ''}`}>
+          {galleryItems.length === 0 && <p className="empty-note">画廊里还没有图片</p>}
+          {galleryItems.map((item) => (
+            <div key={item.id} className="asset-tile gallery-tile" title={item.title}>
+              <img src={item.url} alt={item.title} loading="lazy" />
+              <span className="asset-provider-badge">{item.provider}</span>
+              {item.kind === 'asset' && <button className="asset-use" type="button" onClick={() => useAsset(item.asset)} title="使用">使用</button>}
+              {item.kind === 'asset' && <button className="asset-delete" type="button" onClick={() => deleteAsset(item.asset)} title="删除"><X size={14} /></button>}
+              <button className="asset-preview-hit" type="button" onClick={() => setPreview(item.url)} title="预览" />
             </div>
           ))}
         </div>
@@ -2006,6 +2392,171 @@ function uniqueAssets(assets: Asset[]) {
   })
 }
 
+function galleryItemsFromUsage(data: UsageResponse | null): GalleryItem[] {
+  const generatedFromTasks: GalleryItem[] = (data?.tasks ?? []).flatMap((task) =>
+    extractImages(task).map((url, index) => ({
+      id: `task-${task.id}-${index}`,
+      kind: 'task' as const,
+      task,
+      url,
+      title: task.prompt || `生成图 ${task.id}`,
+      provider: providerName(task.provider || 'generated'),
+      created_at: task.created_at,
+      generated: true as const,
+    })),
+  )
+  const assetItems: GalleryItem[] = uniqueAssets(data?.assets ?? []).map((asset) => ({
+    id: `asset-${asset.id}`,
+    kind: 'asset' as const,
+    asset,
+    url: assetImageSrc(asset),
+    title: asset.file_name,
+    provider: providerLabel(asset),
+    created_at: asset.created_at,
+    generated: isGeneratedAsset(asset),
+  }))
+  return [...generatedFromTasks, ...assetItems].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+}
+
+const defaultRemoveBackgroundPrompt = 'Remove the background from the selected image. Keep the subject unchanged, preserve edges and fine details, and output a transparent PNG.'
+
+function emptyCanvasState(): CanvasState {
+  return { zoom: 1, panX: 60, panY: 60, nodes: [] }
+}
+
+function parseCanvasState(raw?: string): CanvasState {
+  if (!raw) return emptyCanvasState()
+  try {
+    const parsed = JSON.parse(raw) as Partial<CanvasState>
+    const nodes = Array.isArray(parsed.nodes) ? parsed.nodes.filter(isCanvasNode) : []
+    return {
+      zoom: clampNumber(parsed.zoom, 0.2, 3, 1),
+      panX: typeof parsed.panX === 'number' ? parsed.panX : 60,
+      panY: typeof parsed.panY === 'number' ? parsed.panY : 60,
+      nodes,
+    }
+  } catch {
+    return emptyCanvasState()
+  }
+}
+
+function isCanvasNode(value: unknown): value is CanvasNode {
+  if (!value || typeof value !== 'object') return false
+  const node = value as Partial<CanvasNode>
+  return typeof node.id === 'string'
+    && typeof node.url === 'string'
+    && typeof node.title === 'string'
+    && typeof node.x === 'number'
+    && typeof node.y === 'number'
+    && typeof node.w === 'number'
+    && typeof node.h === 'number'
+}
+
+function mergeCanvasState(state: CanvasState, sources: CanvasNode[]): CanvasState {
+  const byID = new Map(state.nodes.map((node) => [node.id, node]))
+  const localNodes = state.nodes.filter((node) => node.source === 'local')
+  const merged = sources.map((node) => ({ ...node, ...byID.get(node.id), url: node.url, title: byID.get(node.id)?.title || node.title }))
+  return { ...state, nodes: [...localNodes, ...merged] }
+}
+
+function canvasNodesFromDetail(detail: SessionDetail | null): CanvasNode[] {
+  if (!detail) return []
+  const taskNodes = (detail.tasks ?? []).flatMap((task, taskIndex) =>
+    extractImages(task).map((url, imageIndex) => ({
+      id: `task-${task.id}-${imageIndex}`,
+      source: 'task' as const,
+      task_id: task.id,
+      image_index: imageIndex,
+      url,
+      title: `生成图 ${taskIndex + 1}.${imageIndex + 1}`,
+      prompt: task.prompt,
+      x: 260 * (imageIndex % 3),
+      y: 260 * taskIndex,
+      w: 240,
+      h: 240,
+    })),
+  )
+  const assetNodes = uniqueAssets(detail.assets ?? []).map((asset, index) => nodeFromAsset(asset, taskNodes.length + index))
+  return [...taskNodes, ...assetNodes]
+}
+
+function nodeFromAsset(asset: Asset, index: number): CanvasNode {
+  return {
+    id: `asset-${asset.id}`,
+    source: 'asset',
+    asset_id: asset.id,
+    url: assetImageSrc(asset),
+    title: asset.file_name || `图片 ${asset.id}`,
+    x: 260 * (index % 3),
+    y: 260 * Math.floor(index / 3),
+    w: 240,
+    h: 240,
+  }
+}
+
+function upsertCanvasNode(nodes: CanvasNode[], node: CanvasNode) {
+  if (nodes.some((item) => item.id === node.id)) return nodes.map((item) => (item.id === node.id ? { ...item, ...node } : item))
+  return [node, ...nodes]
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? clamp(value, min, max) : fallback
+}
+
+function removeBackgroundFromURL(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      const scale = Math.min(1, 1200 / Math.max(img.naturalWidth, img.naturalHeight))
+      const width = Math.max(1, Math.round(img.naturalWidth * scale))
+      const height = Math.max(1, Math.round(img.naturalHeight * scale))
+      const canvas = document.createElement('canvas')
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        reject(new Error('浏览器不支持 Canvas'))
+        return
+      }
+      ctx.drawImage(img, 0, 0, width, height)
+      const data = ctx.getImageData(0, 0, width, height)
+      const bg = sampleEdgeColor(data.data, width, height)
+      for (let i = 0; i < data.data.length; i += 4) {
+        const distance = colorDistance(data.data[i], data.data[i + 1], data.data[i + 2], bg)
+        if (distance < 34) data.data[i + 3] = 0
+        else if (distance < 62) data.data[i + 3] = Math.round(data.data[i + 3] * ((distance - 34) / 28))
+      }
+      ctx.putImageData(data, 0, 0)
+      resolve(canvas.toDataURL('image/png'))
+    }
+    img.onerror = () => reject(new Error('图片加载失败'))
+    img.src = url
+  })
+}
+
+function sampleEdgeColor(data: Uint8ClampedArray, width: number, height: number): [number, number, number] {
+  const points = [
+    [0, 0],
+    [width - 1, 0],
+    [0, height - 1],
+    [width - 1, height - 1],
+  ]
+  const sum = points.reduce<[number, number, number]>((acc, [x, y]) => {
+    const i = (y * width + x) * 4
+    return [acc[0] + data[i], acc[1] + data[i + 1], acc[2] + data[i + 2]]
+  }, [0, 0, 0])
+  return [sum[0] / points.length, sum[1] / points.length, sum[2] / points.length]
+}
+
+function colorDistance(r: number, g: number, b: number, bg: [number, number, number]) {
+  return Math.sqrt((r - bg[0]) ** 2 + (g - bg[1]) ** 2 + (b - bg[2]) ** 2)
+}
+
 function assetImageSrc(asset: Asset) { return asset.local_url || asset.url }
 
 function isGeneratedAsset(asset: Asset) {
@@ -2018,6 +2569,13 @@ function providerLabel(asset: Asset) {
   if (asset.provider === 'evolink') return 'Evolink'
   if (asset.provider === 'maxqi') return 'MaxQi'
   return asset.provider
+}
+
+function providerName(provider: string) {
+  if (!provider) return '生成'
+  if (provider === 'evolink') return 'Evolink'
+  if (provider === 'maxqi') return 'MaxQi'
+  return provider
 }
 
 function extractImages(task?: Task): string[] {

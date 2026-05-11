@@ -40,10 +40,12 @@ export const api = {
   },
   listSessions: () => request<{ sessions: Session[] | null }>('/api/sessions'),
   listAllSessions: () => request<{ sessions: Session[] | null }>('/api/sessions/manage'),
-  createSession: (title?: string) =>
-    request<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ title }) }),
+  createSession: (title?: string, kind?: string) =>
+    request<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ title, kind }) }),
   updateSession: (id: number, title: string) =>
     request<{ session: Session }>(`/api/sessions/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
+  updateSessionCanvas: (id: number, canvas_state: unknown) =>
+    request<{ session: Session }>(`/api/sessions/${id}/canvas`, { method: 'PUT', body: JSON.stringify({ canvas_state }) }),
   archiveSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}/archive`, { method: 'POST' }),
   unarchiveSession: (id: number) => request<{ session: Session }>(`/api/sessions/${id}/unarchive`, { method: 'POST' }),
   deleteSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}`, { method: 'DELETE' }),
