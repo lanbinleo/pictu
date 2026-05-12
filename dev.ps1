@@ -12,12 +12,12 @@ function Stop-ListeningPort {
 
   $pids = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue |
     Select-Object -ExpandProperty OwningProcess -Unique
-  foreach ($pid in $pids) {
-    if (-not $pid) { continue }
-    $owner = Get-Process -Id $pid -ErrorAction SilentlyContinue
-    $label = if ($owner) { "$($owner.ProcessName) (PID $($owner.Id))" } else { "PID $pid" }
+  foreach ($pider in $pids) {
+    if (-not $pider) { continue }
+    $owner = Get-Process -Id $pider -ErrorAction SilentlyContinue
+    $label = if ($owner) { "$($owner.ProcessName) (PID $($owner.Id))" } else { "PID $pider" }
     Write-Host "停止占用端口 $Port 的进程：$label"
-    Stop-Process -Id $pid -Force -ErrorAction Stop
+    Stop-Process -Id $pider -Force -ErrorAction Stop
   }
 }
 

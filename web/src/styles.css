@@ -1251,8 +1251,11 @@ pre {
 }
 
 .provider-menu-wrap {
-  margin-left: auto;
   align-items: flex-end;
+}
+
+.planner-provider-menu-wrap {
+  margin-left: auto;
 }
 
 .count-menu-wrap {
@@ -1431,19 +1434,38 @@ pre {
 
 .asset-upload-tile,
 .asset-tile.compact {
-  min-height: 72px;
-  aspect-ratio: 1;
+  position: relative;
+  overflow: hidden;
+  height: 0;
+  padding-bottom: 100%;
   border: 0;
   border-radius: 10px;
   box-shadow: var(--ring);
 }
 
+.asset-tile.compact img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  border-radius: 10px;
+  z-index: 1;
+}
+
+.asset-tile.compact::after {
+  display: none;
+}
+
 .asset-upload-tile {
+  height: auto;
+  padding-bottom: 0;
+  aspect-ratio: 1;
   display: grid;
   place-items: center;
   color: var(--accent);
   background: var(--panel-2);
-  padding: 0;
 }
 
 .asset-gallery-loading {
@@ -1511,7 +1533,15 @@ pre {
   border-radius: 10px;
   background: rgba(20, 20, 19, 0.28);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.16s ease;
+}
+
+.gallery-tile.asset-tile::after { display: none; }
+
+.gallery-tile.asset-tile:hover {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .asset-use,
@@ -1534,6 +1564,22 @@ pre {
   transform: translate(-50%, -44%);
   white-space: nowrap;
   font-size: 0.8rem;
+}
+
+.gallery-tile .asset-use {
+  left: 4px;
+  top: 4px;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform: none;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(20, 20, 19, 0.72);
 }
 
 .asset-delete {
@@ -1591,6 +1637,9 @@ pre {
 
 .asset-tile:hover .asset-use,
 .asset-use:focus-visible { transform: translate(-50%, -50%); }
+
+.gallery-tile.asset-tile:hover .asset-use,
+.gallery-tile .asset-use:focus-visible { transform: none; }
 
 .section-title {
   display: flex;
@@ -2099,13 +2148,14 @@ pre {
   margin: 0 auto;
   min-height: 0;
   height: 100%;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   overflow: hidden;
 }
 
 .gallery-toolbar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2145,18 +2195,16 @@ pre {
 }
 
 .gallery-masonry {
+  flex: 1 1 0;
   min-height: 0;
-  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  grid-auto-flow: row;
-  grid-auto-rows: auto;
+  grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: min-content;
   gap: 12px;
   align-content: start;
-  align-items: start;
   padding-right: 6px;
 }
 
@@ -2166,19 +2214,27 @@ pre {
   grid-template-columns: 1fr;
 }
 
-.gallery-masonry .gallery-tile {
-  margin-bottom: 0;
-}
-
 .gallery-tile {
-  display: block;
+  position: relative;
+  overflow: hidden;
   width: 100%;
+  aspect-ratio: 1 / 1;
   border: 0;
   border-radius: 10px;
-  background: transparent;
+  background: var(--panel-2);
   padding: 0;
-  overflow: hidden;
   box-shadow: var(--ring);
+}
+
+.gallery-tile img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  object-position: center;
+  border-radius: 10px;
 }
 
 .asset-tile.shape-square { aspect-ratio: 1 / 1; }
@@ -2485,16 +2541,6 @@ pre {
 .canvas-action-stack {
   display: grid;
   gap: 8px;
-}
-
-.gallery-tile img {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-  object-position: center;
-  background: transparent;
-  border-radius: 10px;
 }
 
 /* ── Admin page ── */
@@ -2970,7 +3016,7 @@ pre {
 
 @media (max-width: 980px) {
   .gallery-masonry {
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    grid-template-columns: repeat(3, 1fr);
   }
   .auth-shell {
     grid-template-columns: 1fr;
@@ -3135,7 +3181,7 @@ pre {
   }
 
   .gallery-masonry {
-    grid-template-columns: repeat(auto-fill, minmax(136px, 1fr));
+    grid-template-columns: repeat(2, 1fr);
     gap: 8px;
   }
 

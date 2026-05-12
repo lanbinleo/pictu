@@ -36,7 +36,6 @@ import {
   imageRatioFromSize,
   imageSizeFromRatio,
   imageSizeLabel,
-  imageTileAspectRatio,
   NEW_CONVERSATION_DRAFT_PREFIX,
   parseCommands,
   normalizeGenerationSettings,
@@ -251,6 +250,10 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   const setSettings = useAppStore((s) => s.setSettings)
   const uploadProvider = useAppStore((s) => s.uploadProvider)
   const setUploadProvider = useAppStore((s) => s.setUploadProvider)
+  const plannerProvider = useAppStore((s) => s.plannerProvider)
+  const setPlannerProvider = useAppStore((s) => s.setPlannerProvider)
+  const imageProvider = useAppStore((s) => s.imageProvider)
+  const setImageProvider = useAppStore((s) => s.setImageProvider)
   const usePlanner = useAppStore((s) => s.usePlanner)
   const setUsePlanner = useAppStore((s) => s.setUsePlanner)
   const user = useAppStore((s) => s.user)
@@ -259,15 +262,13 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   const [error, setError] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [assetGalleryOpen, setAssetGalleryOpen] = useState(false)
+  const [plannerProviderOpen, setPlannerProviderOpen] = useState(false)
   const [imageProviderOpen, setImageProviderOpen] = useState(false)
   const [countMenuOpen, setCountMenuOpen] = useState(false)
   const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
   const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
-  const [plannerProvider, setPlannerProvider] = useState('')
-  const [plannerModel, setPlannerModel] = useState('')
-  const [imageProvider, setImageProvider] = useState('')
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const actionsRef = useRef<HTMLDivElement | null>(null)
@@ -277,7 +278,9 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   const composerCentered = !conversationStarted
   const greeting = useMemo(() => buildComposerGreeting(user), [user?.display_name, user?.email])
   const selectedPlannerProvider = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
-  const selectedPlannerModel = plannerModel || runtimeSettings?.defaults.planner_model || ''
+  const selectedPlannerProviderConfig = runtimeSettings?.llm_providers.find((p) => p.id === selectedPlannerProvider)
+  const selectedPlannerModel = selectedPlannerProviderConfig?.planner_model || runtimeSettings?.defaults.planner_model || ''
+  const selectedPlannerProviderLabel = selectedPlannerProviderConfig?.name || selectedPlannerProvider
   const selectedImageProvider = imageProvider || runtimeSettings?.defaults.image_provider || ''
   const selectedImageProviderLabel = runtimeSettings?.image_providers.find((p) => p.id === selectedImageProvider)?.name || selectedImageProvider
   const effectiveSettings = useMemo(() => normalizeGenerationSettings(settings), [settings.size, settings.resolution, settings.quality, settings.count])
@@ -291,7 +294,17 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     if (!uploadProvider || !runtimeSettings.upload_providers.some((p) => p.id === uploadProvider)) {
       setUploadProvider(runtimeSettings.defaults.upload_provider)
     }
-  }, [runtimeSettings?.defaults.upload_provider])
+  }, [runtimeSettings, uploadProvider, setUploadProvider])
+
+  useEffect(() => {
+    if (!runtimeSettings) return
+    if (plannerProvider && !runtimeSettings.llm_providers.some((p) => p.id === plannerProvider && p.enabled && p.allow_user_select)) {
+      setPlannerProvider('')
+    }
+    if (imageProvider && !runtimeSettings.image_providers.some((p) => p.id === imageProvider && p.enabled && p.allow_user_select)) {
+      setImageProvider('')
+    }
+  }, [runtimeSettings, plannerProvider, imageProvider, setPlannerProvider, setImageProvider])
 
   function chooseUploadFiles() {
     setAssetGalleryOpen(false)
@@ -314,6 +327,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   function openAssetGallery() {
     setAssetGalleryOpen((o) => !o)
     setSettingsOpen(false)
+    setPlannerProviderOpen(false)
     setImageProviderOpen(false)
     setCountMenuOpen(false)
     if (!assetGalleryOpen) loadAssetGallery()
@@ -321,6 +335,15 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
 
   function openSettings() {
     setSettingsOpen((o) => !o)
+    setAssetGalleryOpen(false)
+    setPlannerProviderOpen(false)
+    setImageProviderOpen(false)
+    setCountMenuOpen(false)
+  }
+
+  function openPlannerProviderMenu() {
+    setPlannerProviderOpen((o) => !o)
+    setSettingsOpen(false)
     setAssetGalleryOpen(false)
     setImageProviderOpen(false)
     setCountMenuOpen(false)
@@ -330,6 +353,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     setImageProviderOpen((o) => !o)
     setSettingsOpen(false)
     setAssetGalleryOpen(false)
+    setPlannerProviderOpen(false)
     setCountMenuOpen(false)
   }
 
@@ -337,6 +361,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     setCountMenuOpen((o) => !o)
     setSettingsOpen(false)
     setAssetGalleryOpen(false)
+    setPlannerProviderOpen(false)
     setImageProviderOpen(false)
   }
 
@@ -348,19 +373,20 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   }, [draft])
 
   useEffect(() => {
-    if (!settingsOpen && !assetGalleryOpen && !imageProviderOpen && !countMenuOpen) return
+    if (!settingsOpen && !assetGalleryOpen && !plannerProviderOpen && !imageProviderOpen && !countMenuOpen) return
     if (galleryPreview) return
     function handleClick(event: MouseEvent) {
       if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
         setSettingsOpen(false)
         setAssetGalleryOpen(false)
+        setPlannerProviderOpen(false)
         setImageProviderOpen(false)
         setCountMenuOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [settingsOpen, assetGalleryOpen, imageProviderOpen, countMenuOpen, galleryPreview])
+  }, [settingsOpen, assetGalleryOpen, plannerProviderOpen, imageProviderOpen, countMenuOpen, galleryPreview])
 
   async function ensureTargetSession() {
     if (sessionId) return sessionId
@@ -607,8 +633,6 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
             </button>
             {settingsOpen && (
               <SettingsPopover settings={settings} setSettings={setSettings}
-                runtimeSettings={runtimeSettings} plannerProvider={selectedPlannerProvider} setPlannerProvider={setPlannerProvider}
-                plannerModel={selectedPlannerModel} setPlannerModel={setPlannerModel}
                 onClose={() => setSettingsOpen(false)} />
             )}
             {assetGalleryOpen && (
@@ -624,6 +648,28 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
               <input type="checkbox" checked={usePlanner} onChange={(e) => setUsePlanner(e.target.checked)} />
             </label>
             <button type="button" className="icon-button mobile-tools-button" onClick={() => setMobileToolsOpen(true)} title="参数"><Settings2 size={18} /></button>
+            <div className="composer-menu-wrap provider-menu-wrap planner-provider-menu-wrap">
+              <button
+                type="button"
+                className="provider-menu-button"
+                onClick={openPlannerProviderMenu}
+                title={`Planner 模型${selectedPlannerProviderLabel ? `：${selectedPlannerProviderLabel}` : ''}`}
+              >
+                <span>{selectedPlannerProviderLabel || 'Planner 模型'}</span>
+                <ChevronDown size={14} />
+              </button>
+              {plannerProviderOpen && (
+                <PlannerProviderPopover
+                  runtimeSettings={runtimeSettings}
+                  value={selectedPlannerProvider}
+                  onSelect={(value) => {
+                    setPlannerProvider(value)
+                    setPlannerProviderOpen(false)
+                  }}
+                  onClose={() => setPlannerProviderOpen(false)}
+                />
+              )}
+            </div>
             <div className="composer-menu-wrap provider-menu-wrap">
               <button
                 type="button"
@@ -694,18 +740,11 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   )
 }
 
-export function SettingsPopover({ settings, setSettings, runtimeSettings, plannerProvider, setPlannerProvider, plannerModel, setPlannerModel, onClose }: {
+export function SettingsPopover({ settings, setSettings, onClose }: {
   settings: GenerationSettingsValue
   setSettings: (s: Partial<GenerationSettingsValue>) => void
-  runtimeSettings: RuntimeSettings | null
-  plannerProvider: string
-  setPlannerProvider: (v: string) => void
-  plannerModel: string
-  setPlannerModel: (v: string) => void
   onClose: () => void
 }) {
-  const plannerProviders = runtimeSettings?.llm_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
-  const selectedPlannerId = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
   return (
     <div className="settings-popover" onClick={(e) => e.stopPropagation()}>
       <div className="settings-popover-head">
@@ -714,20 +753,37 @@ export function SettingsPopover({ settings, setSettings, runtimeSettings, planne
       </div>
       <div className="settings-popover-body">
         <SettingsControls settings={settings} setSettings={setSettings} />
-        {runtimeSettings && (
-          <div className="settings-controls planner-settings-controls">
-            <label>
-              Planner 模型
-              <select value={selectedPlannerId} onChange={(e) => {
-                const next = runtimeSettings.llm_providers.find((p) => p.id === e.target.value)
-                setPlannerProvider(e.target.value)
-                setPlannerModel(next?.planner_model || '')
-              }}>
-                {plannerProviders.map((p) => <option key={p.id} value={p.id}>{p.name || p.id}</option>)}
-              </select>
-            </label>
-          </div>
-        )}
+      </div>
+    </div>
+  )
+}
+
+export function PlannerProviderPopover({ runtimeSettings, value, onSelect, onClose }: {
+  runtimeSettings: RuntimeSettings | null
+  value: string
+  onSelect: (value: string) => void
+  onClose: () => void
+}) {
+  const providers = runtimeSettings?.llm_providers.filter((p) => p.enabled && p.allow_user_select) ?? []
+  return (
+    <div className="image-provider-popover" onClick={(e) => e.stopPropagation()}>
+      <div className="image-provider-popover-head">
+        <strong>Planner 模型</strong>
+        <button type="button" className="icon-button" onClick={onClose} title="关闭"><X size={16} /></button>
+      </div>
+      <div className="image-provider-list">
+        {providers.length === 0 && <p className="empty-note">暂无可选 provider</p>}
+        {providers.map((provider) => (
+          <button
+            key={provider.id}
+            type="button"
+            className={`image-provider-option ${value === provider.id ? 'active' : ''}`}
+            onClick={() => onSelect(provider.id)}
+          >
+            <span>{provider.name || provider.id}</span>
+            {value === provider.id && <Check size={14} />}
+          </button>
+        ))}
       </div>
     </div>
   )
@@ -926,7 +982,6 @@ export function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, 
   onPreview: (a: Asset) => void
   onClose: () => void
 }) {
-  const [tileRatios, setTileRatios] = useState<Record<number, string>>({})
   return (
     <div className="asset-gallery-popover" onClick={(e) => e.stopPropagation()}>
       <div className="asset-gallery-head">
@@ -949,16 +1004,11 @@ export function AssetGalleryPopover({ assets, selectedAssetIds, uploadProvider, 
           <div
             key={asset.id}
             className={`asset-tile compact ${selectedAssetIds.includes(asset.id) ? 'selected' : ''}`}
-            style={{ aspectRatio: tileRatios[asset.id] ?? '1 / 1' }}
             title={asset.file_name}
           >
             <img
               src={assetImageSrc(asset)}
               alt={asset.file_name}
-              onLoad={(event) => {
-                const { naturalWidth, naturalHeight } = event.currentTarget
-                setTileRatios((current) => ({ ...current, [asset.id]: imageTileAspectRatio(naturalWidth, naturalHeight) }))
-              }}
             />
             <button className="asset-use" type="button" onClick={() => onUse(asset)} title="使用">
               {selectedAssetIds.includes(asset.id) ? '已用' : '使用'}

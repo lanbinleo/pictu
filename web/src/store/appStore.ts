@@ -19,6 +19,8 @@ type AppState = {
   theme: 'light' | 'dark'
   locale: 'zh-CN' | 'en-US'
   uploadProvider: string
+  plannerProvider: string
+  imageProvider: string
   usePlanner: boolean
   page: Page
   setAuth: (token: string, user: User) => void
@@ -35,6 +37,8 @@ type AppState = {
   toggleTheme: () => void
   setLocale: (locale: AppState['locale']) => void
   setUploadProvider: (provider: string) => void
+  setPlannerProvider: (provider: string) => void
+  setImageProvider: (provider: string) => void
   setUsePlanner: (usePlanner: boolean) => void
   setPage: (page: Page) => void
 }
@@ -56,6 +60,8 @@ export const useAppStore = create<AppState>()(
       theme: 'light',
       locale: 'zh-CN',
       uploadProvider: 'evolink',
+      plannerProvider: '',
+      imageProvider: '',
       usePlanner: true,
       page: 'workspace',
       setAuth: (token, user) => set({ token, user }),
@@ -80,6 +86,8 @@ export const useAppStore = create<AppState>()(
       toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
       setLocale: (locale) => set({ locale }),
       setUploadProvider: (provider) => set({ uploadProvider: provider }),
+      setPlannerProvider: (provider) => set({ plannerProvider: provider }),
+      setImageProvider: (provider) => set({ imageProvider: provider }),
       setUsePlanner: (usePlanner) => set({ usePlanner }),
       setPage: (page) => set({ page }),
     }),
@@ -94,6 +102,8 @@ export const useAppStore = create<AppState>()(
         theme: state.theme,
         locale: state.locale,
         uploadProvider: state.uploadProvider,
+        plannerProvider: state.plannerProvider,
+        imageProvider: state.imageProvider,
         usePlanner: state.usePlanner,
       }),
     },
