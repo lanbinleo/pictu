@@ -15,6 +15,8 @@ export type Session = {
   tenant_id: number
   user_id: number
   title: string
+  kind: 'chat' | 'canvas'
+  canvas_state?: string
   task_status?: '' | 'pending' | 'processing' | 'completed' | 'failed'
   created_at: string
   updated_at: string
@@ -33,6 +35,7 @@ export type Asset = {
   provider: string
   content_hash: string
   created_at: string
+  last_used_at?: string
 }
 
 export type Message = {
@@ -91,6 +94,7 @@ export type UsageResponse = {
   summary: UsageSummary
   ledger: CreditLedger[] | null
   assets: Asset[] | null
+  tasks?: Task[] | null
 }
 
 export type GenerationPlan = {
@@ -121,7 +125,7 @@ export type GenerateResponse = {
 export type StreamEvent =
   | { type: 'content'; text: string }
   | { type: 'thinking'; text: string }
-  | { type: 'tool'; phase: 'preparing' | 'calling'; text?: string; prompt?: string }
+  | { type: 'tool'; phase: 'preparing' | 'calling'; text?: string; prompt?: string; progress?: number }
   | ({ type: 'confirm' } & GenerateResponse)
   | ({ type: 'done' } & GenerateResponse)
   | { type: 'error'; error: string }
@@ -150,6 +154,10 @@ export type RuntimeDefaults = {
   image_provider: string
 }
 
+export type RuntimePrompts = {
+  planner_system_prompt: string
+}
+
 export type RuntimeLLMProvider = {
   id: string
   name: string
@@ -161,8 +169,15 @@ export type RuntimeLLMProvider = {
   timeout_seconds: number
   max_context_messages: number
   credit_multiplier: number
+  supports_vision: boolean
   allow_user_select: boolean
   enabled: boolean
+}
+
+export type RuntimeLLMModel = {
+  id: string
+  name: string
+  supports_vision: boolean
 }
 
 export type RuntimeUploadProvider = {
@@ -185,12 +200,14 @@ export type RuntimeImageProvider = {
   model: string
   credit_multiplier: number
   allow_user_select: boolean
+  use_builtin_storage: boolean
   enabled: boolean
 }
 
 export type RuntimeSettings = {
   billing: RuntimeBilling
   defaults: RuntimeDefaults
+  prompts: RuntimePrompts
   llm_providers: RuntimeLLMProvider[]
   upload_providers: RuntimeUploadProvider[]
   image_providers: RuntimeImageProvider[]

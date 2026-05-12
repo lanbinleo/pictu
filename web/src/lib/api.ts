@@ -1,5 +1,5 @@
 import { useAppStore } from '../store/appStore'
-import type { AdminLedgerEntry, AdminStats, Asset, GenerateResponse, RuntimeSettings, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
+import type { AdminLedgerEntry, AdminStats, Asset, GenerateResponse, RuntimeLLMModel, RuntimeLLMProvider, RuntimeSettings, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
 
 type AuthResponse = {
   token: string
@@ -40,10 +40,12 @@ export const api = {
   },
   listSessions: () => request<{ sessions: Session[] | null }>('/api/sessions'),
   listAllSessions: () => request<{ sessions: Session[] | null }>('/api/sessions/manage'),
-  createSession: (title?: string) =>
-    request<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ title }) }),
+  createSession: (title?: string, kind?: string) =>
+    request<{ session: Session }>('/api/sessions', { method: 'POST', body: JSON.stringify({ title, kind }) }),
   updateSession: (id: number, title: string) =>
     request<{ session: Session }>(`/api/sessions/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
+  updateSessionCanvas: (id: number, canvas_state: unknown) =>
+    request<{ session: Session }>(`/api/sessions/${id}/canvas`, { method: 'PUT', body: JSON.stringify({ canvas_state }) }),
   archiveSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}/archive`, { method: 'POST' }),
   unarchiveSession: (id: number) => request<{ session: Session }>(`/api/sessions/${id}/unarchive`, { method: 'POST' }),
   deleteSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}`, { method: 'DELETE' }),
@@ -140,6 +142,11 @@ export const api = {
   adminSettings: () => request<{ settings: RuntimeSettings }>('/api/admin/settings'),
   adminSaveSettings: (settings: RuntimeSettings) =>
     request<{ settings: RuntimeSettings }>('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ settings }) }),
+  adminLLMProviderModels: (provider: RuntimeLLMProvider) =>
+    request<{ models: RuntimeLLMModel[] | null }>('/api/admin/llm-provider-models', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    }),
 }
 
 function parseSSE(chunk: string): StreamEvent | null {

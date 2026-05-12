@@ -83,6 +83,7 @@ func (s *Server) routes() *gin.Engine {
 	protected.POST("/sessions", s.createSession)
 	protected.GET("/sessions/:id", s.getSession)
 	protected.PUT("/sessions/:id", s.updateSession)
+	protected.PUT("/sessions/:id/canvas", s.updateSessionCanvas)
 	protected.POST("/sessions/:id/archive", s.archiveSession)
 	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
 	protected.DELETE("/sessions/:id", s.deleteSession)
@@ -104,6 +105,7 @@ func (s *Server) routes() *gin.Engine {
 	admin.GET("/ledger", s.adminLedger)
 	admin.GET("/settings", s.adminGetSettings)
 	admin.PUT("/settings", s.adminSaveSettings)
+	admin.POST("/llm-provider-models", s.adminLLMProviderModels)
 
 	s.serveFrontend(r)
 	return r
@@ -302,11 +304,35 @@ func (s *Server) listAllSessions(c *gin.Context) {
 func (s *Server) createSession(c *gin.Context) {
 	var req struct {
 		Title string `json:"title"`
+		Kind  string `json:"kind"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	session, err := s.store.CreateSession(c, currentUser(c), req.Title)
+	session, err := s.store.CreateSession(c, currentUser(c), req.Title, req.Kind)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"session": session})
+}
+
+func (s *Server) updateSessionCanvas(c *gin.Context) {
+	id, ok := pathID(c)
+	if !ok {
+		return
+	}
+	var req struct {
+		CanvasState json.RawMessage `json:"canvas_state" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	if !json.Valid(req.CanvasState) {
+		fail(c, http.StatusBadRequest, "invalid canvas state")
+		return
+	}
+	session, err := s.store.UpdateSessionCanvasState(c, currentUser(c), id, string(req.CanvasState))
+	if err != nil {
+		statusFromErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"session": session})
@@ -470,10 +496,12 @@ func (s *Server) useAsset(c *gin.Context) {
 		return
 	}
 	if source.SessionID == sessionID {
+		_ = s.store.TouchAssetsUsed(c, user, []int64{source.ID})
 		c.JSON(http.StatusOK, gin.H{"asset": source})
 		return
 	}
 	if existing, err := s.store.FindAssetByHash(c, user, sessionID, source.Provider, source.ContentHash); err == nil {
+		_ = s.store.TouchAssetsUsed(c, user, []int64{existing.ID})
 		c.JSON(http.StatusOK, gin.H{"asset": existing, "deduped": true})
 		return
 	}
@@ -482,6 +510,7 @@ func (s *Server) useAsset(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	_ = s.store.TouchAssetsUsed(c, user, []int64{asset.ID})
 	c.JSON(http.StatusOK, gin.H{"asset": asset})
 }
 
@@ -532,6 +561,7 @@ func (s *Server) generate(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	_ = s.store.TouchAssetsUsed(c, user, req.AssetIDs)
 	var imageURLs []string
 	var imageNames []string
 	for i, asset := range assets {
@@ -547,6 +577,7 @@ func (s *Server) generate(c *gin.Context) {
 	input := PlanInput{
 		UserText:        req.Message,
 		ImageNames:      imageNames,
+		ImageURLs:       plannerReferenceURLs(assets),
 		Size:            req.Size,
 		Resolution:      req.Resolution,
 		Quality:         req.Quality,
@@ -627,6 +658,7 @@ func (s *Server) generate(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "unknown image provider")
 		return
 	}
+	imageURLs = imageReferenceURLs(imageProvider, assets)
 	baseCost := EstimateCost(settings.Billing.ImageBaseCost, settings.Billing.ImageInputCost, settings.Billing.LowQualityMultiplier, settings.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
 	cost := multiplyCost(baseCost, imageProvider.CreditMultiplier)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
@@ -662,7 +694,7 @@ func (s *Server) generate(c *gin.Context) {
 	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 	if task.Status == "completed" {
-		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), task)
+		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), user, sessionID, task)
 	} else {
 		go s.pollTask(task.ID)
 	}
@@ -700,6 +732,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	_ = s.store.TouchAssetsUsed(c, user, req.AssetIDs)
 	var imageURLs []string
 	var imageNames []string
 	for i, asset := range assets {
@@ -715,6 +748,7 @@ func (s *Server) generateStream(c *gin.Context) {
 	input := PlanInput{
 		UserText:        req.Message,
 		ImageNames:      imageNames,
+		ImageURLs:       plannerReferenceURLs(assets),
 		Size:            req.Size,
 		Resolution:      req.Resolution,
 		Quality:         req.Quality,
@@ -794,6 +828,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		_ = flush("error", gin.H{"error": "unknown image provider"})
 		return
 	}
+	imageURLs = imageReferenceURLs(imageProvider, assets)
 	baseCost := EstimateCost(settings.Billing.ImageBaseCost, settings.Billing.ImageInputCost, settings.Billing.LowQualityMultiplier, settings.Billing.HighQualityMultiplier, plan.Quality, len(imageURLs), plan.Count)
 	cost := multiplyCost(baseCost, imageProvider.CreditMultiplier)
 	if err := s.store.ReserveCredits(c, user, cost, "image_generation", ""); err != nil {
@@ -810,7 +845,14 @@ func (s *Server) generateStream(c *gin.Context) {
 		N:          plan.Count,
 	}
 	_ = flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt})
-	task, err := s.createImageTask(c.Request.Context(), imageProvider, evReq)
+	var task evolink.TaskResponse
+	if imageProvider.Type == "right_codes" {
+		task, err = createRightCodesImageTaskStream(c.Request.Context(), imageProvider, evReq, func(progress int) error {
+			return flush("tool", gin.H{"phase": "calling", "prompt": plan.Prompt, "progress": progress})
+		})
+	} else {
+		task, err = s.createImageTask(c.Request.Context(), imageProvider, evReq)
+	}
 	if err != nil {
 		_ = s.store.AddCredits(context.Background(), user, cost, "generation_refund", "")
 		_ = flush("error", gin.H{"error": err.Error()})
@@ -825,7 +867,7 @@ func (s *Server) generateStream(c *gin.Context) {
 	msg, _ := s.store.AddMessage(c, user, sessionID, "assistant", plan.AssistantMessage, plan.Prompt, task.ID)
 	s.maybeTitleSession(c, user, sessionID, contextMessages, req.Message, plan.AssistantMessage)
 	if task.Status == "completed" {
-		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), task)
+		localTask.ResultJSON = s.storeCompletedImageTask(c.Request.Context(), user, sessionID, task)
 	} else {
 		go s.pollTask(task.ID)
 	}
@@ -869,7 +911,12 @@ func (s *Server) usage(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"summary": summary, "ledger": ledger, "assets": assets})
+	tasks, err := s.store.ListUserTasks(c, fresh, 100)
+	if err != nil {
+		fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"summary": summary, "ledger": ledger, "assets": assets, "tasks": tasks})
 }
 
 func (s *Server) adminUsers(c *gin.Context) {
@@ -896,6 +943,7 @@ func (s *Server) runtimeOptions(c *gin.Context) {
 	for i := range settings.ImageProviders {
 		settings.ImageProviders[i].APIKey = ""
 	}
+	settings.Prompts = RuntimePrompts{}
 	c.JSON(http.StatusOK, gin.H{"settings": settings})
 }
 
@@ -967,6 +1015,21 @@ func (s *Server) adminGetSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"settings": settings})
 }
 
+func (s *Server) adminLLMProviderModels(c *gin.Context) {
+	var req struct {
+		Provider RuntimeLLMProvider `json:"provider" binding:"required"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	models, err := fetchLLMModels(c.Request.Context(), req.Provider)
+	if err != nil {
+		fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
 func (s *Server) adminSaveSettings(c *gin.Context) {
 	var req struct {
 		Settings RuntimeSettings `json:"settings" binding:"required"`
@@ -987,13 +1050,13 @@ func (s *Server) pollTask(providerTaskID string) {
 	defer cancel()
 	ticker := time.NewTicker(s.cfg.Evolink.PollInterval())
 	defer ticker.Stop()
-	task, _, err := s.store.GetTaskByProviderID(context.Background(), providerTaskID)
-	if err != nil || task.Provider == "" {
-		task.Provider = "evolink"
+	localTask, taskUser, err := s.store.GetTaskByProviderID(context.Background(), providerTaskID)
+	if err != nil || localTask.Provider == "" {
+		localTask.Provider = "evolink"
 	}
 	client := s.evolink
 	if settings, err := s.runtimeSettings(context.Background()); err == nil {
-		if provider, ok := settings.imageProvider(task.Provider); ok && provider.Type == "evolink" {
+		if provider, ok := settings.imageProvider(localTask.Provider); ok && provider.Type == "evolink" {
 			client = evolink.New(runtimeEvolinkConfig(s.cfg.Evolink, provider))
 		}
 	}
@@ -1015,9 +1078,10 @@ func (s *Server) pollTask(providerTaskID string) {
 				taskErr = task.Error.Message
 			}
 			if task.Status == "completed" {
-				resultJSON = []byte(s.archiveTaskImages(ctx, providerTaskID, string(resultJSON)))
+				s.storeCompletedImageTask(context.Background(), taskUser, localTask.SessionID, task)
+			} else {
+				_ = s.store.UpdateTask(context.Background(), providerTaskID, task.Status, task.Progress, string(resultJSON), taskErr)
 			}
-			_ = s.store.UpdateTask(context.Background(), providerTaskID, task.Status, task.Progress, string(resultJSON), taskErr)
 			if task.Status == "completed" || task.Status == "failed" {
 				if task.Status == "failed" {
 					_ = s.store.RefundTaskCredits(context.Background(), providerTaskID)
@@ -1227,6 +1291,51 @@ func messageWithReferences(text string, assets []store.Asset) string {
 		return text
 	}
 	return strings.TrimSpace(text) + "\n\n" + strings.Join(refs, " ")
+}
+
+func plannerReferenceURLs(assets []store.Asset) []string {
+	var urls []string
+	for _, asset := range assets {
+		url := strings.TrimSpace(asset.URL)
+		if url == "" {
+			url = strings.TrimSpace(asset.LocalURL)
+		}
+		if strings.HasPrefix(strings.ToLower(url), "http://") || strings.HasPrefix(strings.ToLower(url), "https://") {
+			urls = append(urls, url)
+		}
+	}
+	return urls
+}
+
+func imageReferenceURLs(provider RuntimeImageProvider, assets []store.Asset) []string {
+	var urls []string
+	for _, asset := range assets {
+		candidate := strings.TrimSpace(asset.URL)
+		if provider.UseBuiltinStorage {
+			candidate = strings.TrimSpace(asset.LocalURL)
+			if candidate != "" && !strings.HasPrefix(strings.ToLower(candidate), "http://") && !strings.HasPrefix(strings.ToLower(candidate), "https://") {
+				base := strings.TrimRight(strings.TrimSpace(provider.FilesBaseURL), "/")
+				if base != "" {
+					candidate = base + "/" + strings.TrimLeft(candidate, "/")
+				}
+			}
+			if candidate == "" {
+				candidate = strings.TrimSpace(asset.URL)
+			}
+		} else if candidate == "" {
+			candidate = strings.TrimSpace(asset.LocalURL)
+			if candidate != "" && !strings.HasPrefix(strings.ToLower(candidate), "http://") && !strings.HasPrefix(strings.ToLower(candidate), "https://") {
+				base := strings.TrimRight(strings.TrimSpace(provider.FilesBaseURL), "/")
+				if base != "" {
+					candidate = base + "/" + strings.TrimLeft(candidate, "/")
+				}
+			}
+		}
+		if strings.HasPrefix(strings.ToLower(candidate), "http://") || strings.HasPrefix(strings.ToLower(candidate), "https://") {
+			urls = append(urls, candidate)
+		}
+	}
+	return urls
 }
 
 func sha256Hex(data []byte) string {

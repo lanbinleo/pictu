@@ -18,6 +18,7 @@ import (
 type PlanInput struct {
 	UserText        string
 	ImageNames      []string
+	ImageURLs       []string
 	Size            string
 	Resolution      string
 	Quality         string
@@ -42,9 +43,20 @@ type Planner struct {
 
 type chatMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    any        `json:"content,omitempty"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+type chatContentPart struct {
+	Type     string            `json:"type"`
+	Text     string            `json:"text,omitempty"`
+	ImageURL *chatImageURLPart `json:"image_url,omitempty"`
+}
+
+type chatImageURLPart struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type toolCall struct {
@@ -105,7 +117,7 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 	}
 
 	messages := []chatMessage{
-		{Role: "system", Content: plannerSystemPrompt()},
+		{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision)},
 	}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
@@ -114,7 +126,7 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 		}
 		messages = append(messages, chatMessage{Role: msg.Role, Content: content})
 	}
-	messages = append(messages, chatMessage{Role: "user", Content: userPlanningPrompt(input)})
+	messages = append(messages, chatMessage{Role: "user", Content: userPlanningContent(input, p.cfg.SupportsVision)})
 
 	var out chatResponse
 	if err := p.doChat(ctx, chatRequest{
@@ -143,7 +155,7 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 		return plan, nil
 	}
 
-	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt()}}
+	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision)}}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
 		if msg.Prompt != "" {
@@ -151,7 +163,7 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 		}
 		messages = append(messages, chatMessage{Role: msg.Role, Content: content})
 	}
-	messages = append(messages, chatMessage{Role: "user", Content: userPlanningPrompt(input)})
+	messages = append(messages, chatMessage{Role: "user", Content: userPlanningContent(input, p.cfg.SupportsVision)})
 
 	reqBody := chatRequest{
 		Model:       p.cfg.PlannerModel,
@@ -184,7 +196,7 @@ func (p *Planner) Title(ctx context.Context, userText, assistantText string, dat
 	if len(out.Choices) == 0 {
 		return fallback, nil
 	}
-	title := strings.TrimSpace(out.Choices[0].Message.Content)
+	title := strings.TrimSpace(messageText(out.Choices[0].Message.Content))
 	title = strings.Trim(title, "\"'“”")
 	if title == "" {
 		return fallback, nil
@@ -208,6 +220,10 @@ func (p *Planner) doChat(ctx context.Context, reqBody chatRequest, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	if strings.Contains(strings.ToLower(p.cfg.BaseURL), "openrouter.ai") {
+		req.Header.Set("HTTP-Referer", "http://localhost")
+		req.Header.Set("X-Title", "PicTu")
+	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -236,6 +252,10 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	if strings.Contains(strings.ToLower(p.cfg.BaseURL), "openrouter.ai") {
+		req.Header.Set("HTTP-Referer", "http://localhost")
+		req.Header.Set("X-Title", "PicTu")
+	}
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return chatMessage{}, err
@@ -296,7 +316,7 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 				}
 			}
 			if choice.Delta.Content != "" {
-				message.Content += choice.Delta.Content
+				message.Content = appendChatMessageContent(message.Content, choice.Delta.Content)
 				if err := emit(PlanStreamEvent{Type: "content", Text: choice.Delta.Content}); err != nil {
 					return message, err
 				}
@@ -344,7 +364,7 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 
 func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
 	plan := GenerationPlan{
-		AssistantMessage: strings.TrimSpace(msg.Content),
+		AssistantMessage: strings.TrimSpace(messageText(msg.Content)),
 		Size:             input.Size,
 		Resolution:       input.Resolution,
 		Quality:          input.Quality,
@@ -373,7 +393,7 @@ func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
 		if args.Count > 0 {
 			plan.Count = args.Count
 		}
-		plan.AssistantMessage = mergeAssistantMessage(msg.Content, args.AssistantMessage)
+		plan.AssistantMessage = mergeAssistantMessage(messageText(msg.Content), args.AssistantMessage)
 		break
 	}
 	if !plan.ToolCalled {
@@ -398,7 +418,7 @@ func mergeAssistantMessage(content, toolMessage string) string {
 func BuildPlan(input PlanInput) GenerationPlan {
 	input = normalizeInput(input)
 	var b strings.Builder
-	b.WriteString("Create a high-quality image result from the user's instruction.\n")
+	b.WriteString("Generate an image prompt as a clear visual brief.\n")
 	if len(input.ImageNames) > 0 {
 		b.WriteString("Reference images are provided in order: ")
 		b.WriteString(strings.Join(input.ImageNames, ", "))
@@ -406,7 +426,7 @@ func BuildPlan(input PlanInput) GenerationPlan {
 	}
 	b.WriteString("User instruction: ")
 	b.WriteString(strings.TrimSpace(input.UserText))
-	b.WriteString("\nOutput requirements: clean composition, natural details, no watermark, no unreadable text unless requested, production-ready image.")
+	b.WriteString("\nOutput requirements: respect the user's requested subject, action, style, composition, text, and restrictions. Use clear scene, lighting, material, camera, and use-case details when they are implied. Avoid watermark, random extra text, clutter, and unrelated objects.")
 	return GenerationPlan{
 		Prompt:           strings.TrimSpace(b.String()),
 		Size:             input.Size,
@@ -463,11 +483,12 @@ func TitleFromPrompt(text string, date time.Time) string {
 
 func normalizeInput(input PlanInput) PlanInput {
 	if input.Size == "" {
-		input.Size = "auto"
+		input.Size = "1024x1024"
 	}
 	if input.Resolution == "" {
 		input.Resolution = "1K"
 	}
+	input.Size = validSize(input.Size, "1024x1024", input.Resolution)
 	if input.Quality == "" {
 		input.Quality = "medium"
 	}
@@ -485,8 +506,8 @@ func sanitizePlan(plan GenerationPlan, input PlanInput) GenerationPlan {
 	if plan.Prompt == "" {
 		plan.Prompt = BuildPlan(input).Prompt
 	}
-	plan.Size = validSize(plan.Size, input.Size)
 	plan.Resolution = validEnum(plan.Resolution, input.Resolution, []string{"1K", "2K", "4K"})
+	plan.Size = validSize(plan.Size, input.Size, plan.Resolution)
 	plan.Quality = validEnum(plan.Quality, input.Quality, []string{"low", "medium", "high"})
 	if plan.Count <= 0 {
 		plan.Count = input.Count
@@ -498,18 +519,56 @@ func sanitizePlan(plan GenerationPlan, input PlanInput) GenerationPlan {
 	return plan
 }
 
-func plannerSystemPrompt() string {
-	return `You are PicTu's planning model. You are a conversational image design partner and a tool-using agent.
+func defaultPlannerSystemPrompt() string {
+	var b strings.Builder
+	b.WriteString(`You are PicTu's Planner. Your job is to turn the user's message into a strong image generation or image editing brief, then call generate_image when the user is ready.
 
-Important:
-- You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.
-- Continue the conversation if the user's idea is underspecified.
-- Call generate_image only when the user is ready to create or edit an image.
-- CURRENT SETTINGS are a reference baseline, not a hard rule. You may keep them or deliberately adjust them when the user's creative goal implies a better setup, such as changing landscape to portrait, increasing quality, or changing count.
-- When calling generate_image, you must fill every tool argument: prompt, size, resolution, quality, count, and assistant_message. If you keep a current setting, repeat its value explicitly.
-- If your tool arguments differ from CURRENT SETTINGS, the UI will ask the user to confirm before generating.
-- Write the generation prompt clearly and completely. The user will see it.
-- Keep assistant_message concise and natural.`
+Core behavior:
+- Follow the user's instructions carefully. Preserve requested subjects, actions, style, composition, text, exclusions, and reference-image relationships.
+- Treat the final prompt as a brief for a visual designer, photographer, illustrator, or retoucher. Do not write a vague keyword list.
+- If the user is still exploring, asks a question, or leaves the actual image request too unclear, continue the conversation without calling generate_image.
+- If the user asks to create, draw, generate, edit, redesign, restyle, replace, add, remove, or modify an image, call generate_image.
+- Use explicit task verbs in the final prompt: Generate, Draw, Create, Edit, Replace, Remove, Add, Restyle, or similar.
+- For reference images, describe what each image is used for by order. Say what must be preserved and what must change.
+- For multi-image edits, avoid vague combine/merge language. Use concrete instructions such as "Edit image 1 by adding the subject from image 2..."
+- If there is text in the image, quote the exact text and state its approximate position and visual treatment. Also avoid adding text when none was requested.
+- Do not invent brand names, logos, identities, faces, UI copy, labels, or copyrighted characters unless the user requested them or they are visible in a reference image.
+- Keep safety-neutral visual details rich: subject, action/state, environment, time of day, lighting, material, mood, composition, lens/camera angle, color palette, and intended use.
+
+Final prompt shape:
+Generate/Edit [image type] of [subject] [action/state],
+in [scene/environment], with [composition/camera/viewpoint],
+using [style/medium/material/lighting/color].
+Must include: [required elements].
+Preserve: [reference elements that must stay].
+Avoid: [unwanted elements].
+Text, if any: [exact text, placement, font feeling].
+Use case: [poster/product image/avatar/UI asset/book illustration/etc.].
+
+Tool and parameter rules:
+- CURRENT SETTINGS are a reference baseline, not a hard rule. Keep them unless the user's creative goal benefits from a better size, resolution, quality, or count.
+- When calling generate_image, fill every tool argument: prompt, size, resolution, quality, count, and assistant_message. If you keep a current setting, repeat its value explicitly.
+- If tool arguments differ from CURRENT SETTINGS, the UI will ask the user to confirm before generating.
+- Put size, resolution, quality, output count, file format, compression, and background mode in tool parameters when parameters exist. Do not rely on the prompt for those.
+- The prompt should be complete enough that the image model can act without reading the conversation.
+- assistant_message should be brief, natural, and in the user's language. Mention notable parameter changes only when useful.`)
+	return b.String()
+}
+
+func plannerSystemPrompt(customPrompt string, canSeeImages bool) string {
+	base := strings.TrimSpace(customPrompt)
+	if base == "" {
+		base = defaultPlannerSystemPrompt()
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n\nRuntime capability:\n")
+	if canSeeImages {
+		b.WriteString("- Reference images may be attached. You can inspect them directly and should use their visual content, order, and relationships when relevant.\n")
+	} else {
+		b.WriteString("- You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.\n")
+	}
+	return b.String()
 }
 
 func userPlanningPrompt(input PlanInput) string {
@@ -517,7 +576,7 @@ func userPlanningPrompt(input PlanInput) string {
 	b.WriteString("CURRENT SETTINGS (reference baseline; you may adjust if the request benefits from it):\n")
 	b.WriteString(fmt.Sprintf("- size: %s\n- resolution: %s\n- quality: %s\n- count: %d\n", input.Size, input.Resolution, input.Quality, input.Count))
 	b.WriteString("AVAILABLE TOOL PARAMETER VALUES:\n")
-	b.WriteString("- size: auto, 1:1, 1:2, 2:1, 1:3, 3:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 9:21, 21:9, or explicit pixels like 1024x1024\n")
+	b.WriteString("- size: explicit pixels like 1024x1024, 1024x1536, 1536x1024, 1344x1792. Keep both sides as multiples of 16.\n")
 	b.WriteString("- resolution: 1K, 2K, 4K\n")
 	b.WriteString("- quality: low, medium, high\n")
 	b.WriteString("- count: integer 1 to 4\n")
@@ -530,6 +589,26 @@ func userPlanningPrompt(input PlanInput) string {
 	b.WriteString("USER MESSAGE:\n")
 	b.WriteString(input.UserText)
 	return b.String()
+}
+
+func userPlanningContent(input PlanInput, supportsVision bool) any {
+	if !supportsVision || len(input.ImageURLs) == 0 {
+		return userPlanningPrompt(input)
+	}
+	content := []chatContentPart{{Type: "text", Text: userPlanningPrompt(input)}}
+	for _, url := range input.ImageURLs {
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		content = append(content, chatContentPart{
+			Type: "image_url",
+			ImageURL: &chatImageURLPart{
+				URL:    url,
+				Detail: "auto",
+			},
+		})
+	}
+	return content
 }
 
 func generateImageTool() toolDef {
@@ -548,7 +627,7 @@ func generateImageTool() toolDef {
 					},
 					"size": map[string]any{
 						"type":        "string",
-						"description": "Selected output size. Use current setting as a reference, but choose the best value for the request. Allowed ratios: auto, 1:1, 1:2, 2:1, 1:3, 3:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 9:21, 21:9. Explicit pixels like 1024x1024 are also allowed.",
+						"description": "Selected output size in pixels, such as 1024x1024, 1024x1536, or 1536x1024. Keep both dimensions as multiples of 16.",
 					},
 					"resolution": map[string]any{
 						"type":        "string",
@@ -583,6 +662,27 @@ func trimContext(messages []store.Message, max int) []store.Message {
 	return messages[len(messages)-max:]
 }
 
+func appendChatMessageContent(current any, next string) any {
+	if next == "" {
+		return current
+	}
+	switch value := current.(type) {
+	case string:
+		return value + next
+	case nil:
+		return next
+	default:
+		return next
+	}
+}
+
+func messageText(content any) string {
+	if text, ok := content.(string); ok {
+		return text
+	}
+	return ""
+}
+
 func coalesce(value, fallback string) string {
 	if strings.TrimSpace(value) != "" {
 		return strings.TrimSpace(value)
@@ -599,18 +699,18 @@ func validEnum(value, fallback string, allowed []string) string {
 	return fallback
 }
 
-func validSize(value, fallback string) string {
-	if value == "" {
-		return fallback
+func validSize(value, fallback, resolution string) string {
+	if normalized, ok := normalizePixelSize(value); ok {
+		return normalized
 	}
-	allowed := []string{"auto", "1:1", "1:2", "2:1", "1:3", "3:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "9:21", "21:9"}
-	for _, item := range allowed {
-		if value == item {
-			return value
-		}
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return rightCodesImageSize(trimmed, resolution)
 	}
-	if strings.Contains(value, "x") || strings.Contains(value, "×") {
-		return value
+	if normalized, ok := normalizePixelSize(fallback); ok {
+		return normalized
 	}
-	return fallback
+	if trimmed := strings.TrimSpace(fallback); trimmed != "" {
+		return rightCodesImageSize(trimmed, resolution)
+	}
+	return rightCodesImageSize("auto", resolution)
 }

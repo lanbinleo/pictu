@@ -35,15 +35,17 @@ type User struct {
 }
 
 type Session struct {
-	ID         int64      `json:"id"`
-	PublicID   string     `json:"public_id"`
-	TenantID   int64      `json:"tenant_id"`
-	UserID     int64      `json:"user_id"`
-	Title      string     `json:"title"`
-	TaskStatus string     `json:"task_status,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	ID          int64      `json:"id"`
+	PublicID    string     `json:"public_id"`
+	TenantID    int64      `json:"tenant_id"`
+	UserID      int64      `json:"user_id"`
+	Title       string     `json:"title"`
+	Kind        string     `json:"kind"`
+	CanvasState string     `json:"canvas_state,omitempty"`
+	TaskStatus  string     `json:"task_status,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 }
 
 type Asset struct {
@@ -58,6 +60,7 @@ type Asset struct {
 	Provider    string    `json:"provider"`
 	ContentHash string    `json:"content_hash"`
 	CreatedAt   time.Time `json:"created_at"`
+	LastUsedAt  string    `json:"last_used_at,omitempty"`
 }
 
 type Message struct {
@@ -183,6 +186,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			tenant_id integer not null references tenants(id) on delete cascade,
 			user_id integer not null references users(id) on delete cascade,
 			title text not null,
+			kind text not null default 'chat',
+			canvas_state text not null default '',
 			created_at datetime not null default current_timestamp,
 			updated_at datetime not null default current_timestamp
 		)`,
@@ -195,6 +200,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			mime_type text not null,
 			url text not null,
 			size_bytes integer not null,
+			last_used_at text not null default '',
 			created_at datetime not null default current_timestamp
 		)`,
 		`create table if not exists messages (
@@ -252,6 +258,12 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "sessions", "public_id", "text not null default ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "sessions", "kind", "text not null default 'chat'"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "sessions", "canvas_state", "text not null default ''"); err != nil {
+		return err
+	}
 	if err := s.backfillSessionPublicIDs(ctx); err != nil {
 		return err
 	}
@@ -265,6 +277,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "assets", "local_url", "text not null default ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "assets", "last_used_at", "text not null default ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "users", "avatar_url", "text not null default ''"); err != nil {
@@ -452,14 +467,22 @@ func (s *Store) UpdateUserAvatar(ctx context.Context, user User, avatarURL strin
 	return s.GetUserByID(ctx, user.ID)
 }
 
-func (s *Store) CreateSession(ctx context.Context, user User, title string) (Session, error) {
+func (s *Store) CreateSession(ctx context.Context, user User, title, kind string) (Session, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		kind = "chat"
+	}
 	if strings.TrimSpace(title) == "" {
-		title = "New image session"
+		if kind == "canvas" {
+			title = "新建画布"
+		} else {
+			title = "未命名会话"
+		}
 	}
 	if err := s.DeleteEmptySessions(ctx, user); err != nil {
 		return Session{}, err
 	}
-	res, err := s.db.ExecContext(ctx, `insert into sessions (public_id, tenant_id, user_id, title) values (?, ?, ?, ?)`, uuid.NewString(), user.TenantID, user.ID, title)
+	res, err := s.db.ExecContext(ctx, `insert into sessions (public_id, tenant_id, user_id, title, kind) values (?, ?, ?, ?, ?)`, uuid.NewString(), user.TenantID, user.ID, title, kind)
 	if err != nil {
 		return Session{}, err
 	}
@@ -473,8 +496,8 @@ func (s *Store) CreateSession(ctx context.Context, user User, title string) (Ses
 func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, error) {
 	var session Session
 	var archivedAt sql.NullTime
-	err := s.db.QueryRowContext(ctx, `select id, public_id, tenant_id, user_id, title, '', created_at, updated_at, archived_at from sessions where id = ? and tenant_id = ? and archived_at is null`, id, user.TenantID).
-		Scan(&session.ID, &session.PublicID, &session.TenantID, &session.UserID, &session.Title, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt, &archivedAt)
+	err := s.db.QueryRowContext(ctx, `select id, public_id, tenant_id, user_id, title, kind, canvas_state, '', created_at, updated_at, archived_at from sessions where id = ? and tenant_id = ? and archived_at is null`, id, user.TenantID).
+		Scan(&session.ID, &session.PublicID, &session.TenantID, &session.UserID, &session.Title, &session.Kind, &session.CanvasState, &session.TaskStatus, &session.CreatedAt, &session.UpdatedAt, &archivedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
@@ -485,7 +508,7 @@ func (s *Store) GetSession(ctx context.Context, user User, id int64) (Session, e
 }
 
 func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `select s.id, s.public_id, s.tenant_id, s.user_id, s.title,
+	rows, err := s.db.QueryContext(ctx, `select s.id, s.public_id, s.tenant_id, s.user_id, s.title, s.kind, s.canvas_state,
 		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
 		s.created_at, s.updated_at, s.archived_at from sessions s where s.tenant_id = ? and s.archived_at is null order by s.updated_at desc`, user.TenantID)
 	if err != nil {
@@ -496,7 +519,7 @@ func (s *Store) ListSessions(ctx context.Context, user User) ([]Session, error) 
 }
 
 func (s *Store) ListAllSessions(ctx context.Context, user User) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `select s.id, s.public_id, s.tenant_id, s.user_id, s.title,
+	rows, err := s.db.QueryContext(ctx, `select s.id, s.public_id, s.tenant_id, s.user_id, s.title, s.kind, s.canvas_state,
 		coalesce((select t.status from tasks t where t.session_id = s.id order by t.id desc limit 1), '') as task_status,
 		s.created_at, s.updated_at, s.archived_at from sessions s where s.tenant_id = ? order by coalesce(s.archived_at, s.updated_at) desc`, user.TenantID)
 	if err != nil {
@@ -515,6 +538,21 @@ func (s *Store) UpdateSessionTitle(ctx context.Context, user User, id int64, tit
 		title = string([]rune(title)[:80])
 	}
 	res, err := s.db.ExecContext(ctx, `update sessions set title = ?, updated_at = current_timestamp where id = ? and tenant_id = ?`, title, id, user.TenantID)
+	if err != nil {
+		return Session{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Session{}, err
+	}
+	if affected == 0 {
+		return Session{}, ErrNotFound
+	}
+	return s.GetSession(ctx, user, id)
+}
+
+func (s *Store) UpdateSessionCanvasState(ctx context.Context, user User, id int64, canvasState string) (Session, error) {
+	res, err := s.db.ExecContext(ctx, `update sessions set canvas_state = ?, updated_at = current_timestamp where id = ? and tenant_id = ?`, canvasState, id, user.TenantID)
 	if err != nil {
 		return Session{}, err
 	}
@@ -607,7 +645,7 @@ func (s *Store) SaveAsset(ctx context.Context, user User, sessionID int64, fileN
 	if _, err := s.GetSession(ctx, user, sessionID); err != nil {
 		return Asset{}, err
 	}
-	res, err := s.db.ExecContext(ctx, `insert into assets (tenant_id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	res, err := s.db.ExecContext(ctx, `insert into assets (tenant_id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, last_used_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)`,
 		user.TenantID, sessionID, user.ID, fileName, mimeType, url, localURL, sizeBytes, provider, contentHash)
 	if err != nil {
 		return Asset{}, err
@@ -622,8 +660,8 @@ func (s *Store) SaveAsset(ctx context.Context, user User, sessionID int64, fileN
 
 func (s *Store) GetAsset(ctx context.Context, user User, id int64) (Asset, error) {
 	var asset Asset
-	err := s.db.QueryRowContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, created_at from assets where id = ? and tenant_id = ?`, id, user.TenantID).
-		Scan(&asset.ID, &asset.SessionID, &asset.UserID, &asset.FileName, &asset.MIMEType, &asset.URL, &asset.LocalURL, &asset.SizeBytes, &asset.Provider, &asset.ContentHash, &asset.CreatedAt)
+	err := s.db.QueryRowContext(ctx, assetSelectSQL()+` where id = ? and tenant_id = ?`, id, user.TenantID).
+		Scan(scanAssetDest(&asset)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -635,10 +673,9 @@ func (s *Store) FindAssetByHash(ctx context.Context, user User, sessionID int64,
 		return Asset{}, ErrNotFound
 	}
 	var asset Asset
-	err := s.db.QueryRowContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, created_at
-		from assets where session_id = ? and tenant_id = ? and provider = ? and content_hash = ? order by id desc limit 1`,
+	err := s.db.QueryRowContext(ctx, assetSelectSQL()+` where session_id = ? and tenant_id = ? and provider = ? and content_hash = ? order by id desc limit 1`,
 		sessionID, user.TenantID, provider, contentHash).
-		Scan(&asset.ID, &asset.SessionID, &asset.UserID, &asset.FileName, &asset.MIMEType, &asset.URL, &asset.LocalURL, &asset.SizeBytes, &asset.Provider, &asset.ContentHash, &asset.CreatedAt)
+		Scan(scanAssetDest(&asset)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Asset{}, ErrNotFound
 	}
@@ -664,47 +701,31 @@ func (s *Store) SetAssetLocalURL(ctx context.Context, user User, id int64, local
 }
 
 func (s *Store) ListAssets(ctx context.Context, user User, sessionID int64) ([]Asset, error) {
-	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, created_at from assets where session_id = ? and tenant_id = ? order by id`, sessionID, user.TenantID)
+	rows, err := s.db.QueryContext(ctx, assetSelectSQL()+` where session_id = ? and tenant_id = ? order by coalesce(nullif(last_used_at, ''), created_at) desc, id desc`, sessionID, user.TenantID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Asset
-	for rows.Next() {
-		var item Asset
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.LocalURL, &item.SizeBytes, &item.Provider, &item.ContentHash, &item.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return scanAssets(rows)
 }
 
 func (s *Store) ListUserAssets(ctx context.Context, user User, limit int) ([]Asset, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `select id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, created_at from assets where tenant_id = ? order by id desc limit ?`, user.TenantID, limit)
+	rows, err := s.db.QueryContext(ctx, assetSelectSQL()+` where tenant_id = ? order by coalesce(nullif(last_used_at, ''), created_at) desc, id desc limit ?`, user.TenantID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Asset
-	for rows.Next() {
-		var item Asset
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.LocalURL, &item.SizeBytes, &item.Provider, &item.ContentHash, &item.CreatedAt); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
+	return scanAssets(rows)
 }
 
 func (s *Store) ListPendingDownloads(ctx context.Context, limit int) ([]Asset, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `select a.id, a.session_id, a.user_id, a.file_name, a.mime_type, a.url, a.local_url, a.size_bytes, a.provider, a.content_hash, a.created_at
+	rows, err := s.db.QueryContext(ctx, `select a.id, a.session_id, a.user_id, a.file_name, a.mime_type, a.url, a.local_url, a.size_bytes, a.provider, a.content_hash, a.created_at, a.last_used_at
 		from assets a where a.local_url = '' and a.url != '' and a.url like 'http%' order by a.id desc limit ?`, limit)
 	if err != nil {
 		return nil, err
@@ -713,7 +734,7 @@ func (s *Store) ListPendingDownloads(ctx context.Context, limit int) ([]Asset, e
 	var items []Asset
 	for rows.Next() {
 		var item Asset
-		if err := rows.Scan(&item.ID, &item.SessionID, &item.UserID, &item.FileName, &item.MIMEType, &item.URL, &item.LocalURL, &item.SizeBytes, &item.Provider, &item.ContentHash, &item.CreatedAt); err != nil {
+		if err := rows.Scan(scanAssetDest(&item)...); err != nil {
 			continue
 		}
 		items = append(items, item)
@@ -724,6 +745,20 @@ func (s *Store) ListPendingDownloads(ctx context.Context, limit int) ([]Asset, e
 func (s *Store) SetAssetLocalURLByID(ctx context.Context, id int64, localURL string) error {
 	_, err := s.db.ExecContext(ctx, `update assets set local_url = ? where id = ?`, localURL, id)
 	return err
+}
+
+func (s *Store) TouchAssetsUsed(ctx context.Context, user User, ids []int64) error {
+	seen := map[int64]bool{}
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if _, err := s.db.ExecContext(ctx, `update assets set last_used_at = current_timestamp where id = ? and tenant_id = ?`, id, user.TenantID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) DeleteAsset(ctx context.Context, user User, id int64) error {
@@ -834,6 +869,26 @@ func (s *Store) GetTaskByProviderID(ctx context.Context, providerTaskID string) 
 
 func (s *Store) ListTasks(ctx context.Context, user User, sessionID int64) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `select id, session_id, provider, provider_task_id, status, progress, cost, prompt, result_json, error, created_at, updated_at from tasks where session_id = ? and tenant_id = ? order by id desc`, sessionID, user.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var item Task
+		if err := rows.Scan(&item.ID, &item.SessionID, &item.Provider, &item.ProviderTaskID, &item.Status, &item.Progress, &item.Cost, &item.Prompt, &item.ResultJSON, &item.Error, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) ListUserTasks(ctx context.Context, user User, limit int) ([]Task, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `select id, session_id, provider, provider_task_id, status, progress, cost, prompt, result_json, error, created_at, updated_at from tasks where tenant_id = ? and user_id = ? order by id desc limit ?`, user.TenantID, user.ID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1141,7 +1196,7 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 	for rows.Next() {
 		var item Session
 		var archivedAt sql.NullTime
-		if err := rows.Scan(&item.ID, &item.PublicID, &item.TenantID, &item.UserID, &item.Title, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt, &archivedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.PublicID, &item.TenantID, &item.UserID, &item.Title, &item.Kind, &item.CanvasState, &item.TaskStatus, &item.CreatedAt, &item.UpdatedAt, &archivedAt); err != nil {
 			return nil, err
 		}
 		if archivedAt.Valid {
@@ -1150,6 +1205,26 @@ func scanSessions(rows *sql.Rows) ([]Session, error) {
 		sessions = append(sessions, item)
 	}
 	return sessions, rows.Err()
+}
+
+func assetSelectSQL() string {
+	return `select id, session_id, user_id, file_name, mime_type, url, local_url, size_bytes, provider, content_hash, created_at, last_used_at from assets`
+}
+
+func scanAssetDest(asset *Asset) []any {
+	return []any{&asset.ID, &asset.SessionID, &asset.UserID, &asset.FileName, &asset.MIMEType, &asset.URL, &asset.LocalURL, &asset.SizeBytes, &asset.Provider, &asset.ContentHash, &asset.CreatedAt, &asset.LastUsedAt}
+}
+
+func scanAssets(rows *sql.Rows) ([]Asset, error) {
+	var items []Asset
+	for rows.Next() {
+		var item Asset
+		if err := rows.Scan(scanAssetDest(&item)...); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func scanLedger(rows *sql.Rows) ([]CreditLedger, error) {

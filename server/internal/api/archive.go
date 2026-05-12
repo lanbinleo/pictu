@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,68 +19,85 @@ import (
 
 var imageURLPattern = regexp.MustCompile(`(?i)^https?://.+\.(png|jpe?g|webp)(\?.*)?$`)
 
-func (s *Server) archiveTaskImages(ctx context.Context, providerTaskID string, resultJSON string) string {
+type archivedImage struct {
+	FileName    string
+	MIMEType    string
+	URL         string
+	LocalURL    string
+	SizeBytes   int64
+	ContentHash string
+}
+
+func (s *Server) archiveTaskImages(ctx context.Context, providerTaskID string, resultJSON string) ([]archivedImage, string) {
 	urls := extractRemoteImageURLs(resultJSON)
 	if len(urls) == 0 {
-		return resultJSON
+		return nil, resultJSON
 	}
 	if err := os.MkdirAll(s.cfg.Storage.GeneratedDir, 0755); err != nil {
-		return resultJSON
+		return nil, resultJSON
 	}
 	client := http.Client{Timeout: 90 * time.Second}
-	var localURLs []string
+	var archived []archivedImage
 	for i, remoteURL := range urls {
-		localURL, err := s.downloadImage(ctx, client, providerTaskID, i, remoteURL)
-		if err == nil && localURL != "" {
-			localURLs = append(localURLs, localURL)
+		item, err := s.downloadImage(ctx, client, providerTaskID, i, remoteURL)
+		if err == nil && item.LocalURL != "" {
+			archived = append(archived, item)
 		}
 	}
-	if len(localURLs) == 0 {
-		return resultJSON
+	if len(archived) == 0 {
+		return nil, resultJSON
 	}
 	var root any
 	if err := json.Unmarshal([]byte(resultJSON), &root); err != nil {
-		return resultJSON
+		return archived, resultJSON
 	}
 	if obj, ok := root.(map[string]any); ok {
-		values := make([]any, 0, len(localURLs))
-		for _, item := range localURLs {
-			values = append(values, item)
+		values := make([]any, 0, len(archived))
+		for _, item := range archived {
+			values = append(values, item.LocalURL)
 		}
 		obj["pictu_local_urls"] = values
 		if data, err := json.Marshal(obj); err == nil {
-			return string(data)
+			return archived, string(data)
 		}
 	}
-	return resultJSON
+	return archived, resultJSON
 }
 
-func (s *Server) downloadImage(ctx context.Context, client http.Client, taskID string, index int, remoteURL string) (string, error) {
+func (s *Server) downloadImage(ctx context.Context, client http.Client, taskID string, index int, remoteURL string) (archivedImage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL, nil)
 	if err != nil {
-		return "", err
+		return archivedImage{}, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return archivedImage{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("download image status %d", resp.StatusCode)
+		return archivedImage{}, fmt.Errorf("download image status %d", resp.StatusCode)
 	}
 	ext := extensionFromURL(remoteURL, resp.Header.Get("Content-Type"))
 	hash := sha1.Sum([]byte(remoteURL))
 	name := fmt.Sprintf("%s-%02d-%s%s", sanitizeFilePart(taskID), index+1, hex.EncodeToString(hash[:])[:10], ext)
 	target := filepath.Join(s.cfg.Storage.GeneratedDir, name)
-	file, err := os.Create(target)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return archivedImage{}, err
 	}
-	defer file.Close()
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		return "", err
+	if err := os.WriteFile(target, data, 0644); err != nil {
+		return archivedImage{}, err
 	}
-	return strings.TrimRight(s.cfg.Storage.PublicPrefix, "/") + "/" + name, nil
+	contentHash := sha256.Sum256(data)
+	localURL := strings.TrimRight(s.cfg.Storage.PublicPrefix, "/") + "/" + name
+	return archivedImage{
+		FileName:    name,
+		MIMEType:    mimeTypeForExtension(ext),
+		URL:         remoteURL,
+		LocalURL:    localURL,
+		SizeBytes:   int64(len(data)),
+		ContentHash: hex.EncodeToString(contentHash[:]),
+	}, nil
 }
 
 func extractRemoteImageURLs(resultJSON string) []string {
@@ -127,6 +145,17 @@ func extensionFromURL(rawURL, contentType string) string {
 	}
 }
 
+func mimeTypeForExtension(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "image/jpeg"
+	}
+}
+
 func sanitizeFilePart(input string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(input) {
@@ -150,10 +179,10 @@ func (s *Server) BackfillLocalImages(ctx context.Context) {
 	}
 	client := http.Client{Timeout: 90 * time.Second}
 	for _, asset := range assets {
-		localURL, err := s.downloadImage(ctx, client, fmt.Sprintf("backfill-%d", asset.ID), 0, asset.URL)
-		if err != nil || localURL == "" {
+		archived, err := s.downloadImage(ctx, client, fmt.Sprintf("backfill-%d", asset.ID), 0, asset.URL)
+		if err != nil || archived.LocalURL == "" {
 			continue
 		}
-		_ = s.store.SetAssetLocalURLByID(ctx, asset.ID, localURL)
+		_ = s.store.SetAssetLocalURLByID(ctx, asset.ID, archived.LocalURL)
 	}
 }
