@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,11 +102,28 @@ type PlanStreamEvent struct {
 	Text string
 }
 
+var (
+	errPlannerStreamDone        = errors.New("planner stream done")
+	errPlannerStreamIdleTimeout = errors.New("planner stream idle timeout")
+)
+
+type plannerEmitError struct {
+	err error
+}
+
+func (e plannerEmitError) Error() string {
+	return e.err.Error()
+}
+
+func (e plannerEmitError) Unwrap() error {
+	return e.err
+}
+
 func NewPlanner(cfg config.LLMConfig) *Planner {
 	return &Planner{
 		cfg: cfg,
 		httpClient: &http.Client{
-			Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+			Timeout: plannerRequestTimeout(cfg.TimeoutSeconds),
 		},
 	}
 }
@@ -175,7 +193,18 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 	}
 	msg, err := p.doChatStream(ctx, reqBody, emit)
 	if err != nil {
-		return p.Plan(ctx, input)
+		var emitErr plannerEmitError
+		if errors.As(err, &emitErr) {
+			return GenerationPlan{}, err
+		}
+		partial := planFromMessage(msg, input)
+		if partial.ToolCalled && strings.TrimSpace(partial.Prompt) != "" {
+			return partial, nil
+		}
+		if fallback, fallbackErr := p.Plan(ctx, input); fallbackErr == nil {
+			return fallback, nil
+		}
+		return BuildPlan(input), nil
 	}
 	return planFromMessage(msg, input), nil
 }
@@ -256,7 +285,8 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 		req.Header.Set("HTTP-Referer", "http://localhost")
 		req.Header.Set("X-Title", "PicTu")
 	}
-	resp, err := p.httpClient.Do(req)
+	client := p.streamHTTPClient()
+	resp, err := client.Do(req)
 	if err != nil {
 		return chatMessage{}, err
 	}
@@ -269,19 +299,11 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 	var message chatMessage
 	toolByIndex := map[int]*toolCall{}
 	toolStarted := false
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, ":") {
-			continue
-		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	sawDone := false
+	err = readSSEPayloads(ctx, resp.Body, plannerStreamIdleTimeout(p.cfg.TimeoutSeconds), func(payload string) error {
 		if payload == "[DONE]" {
-			break
+			sawDone = true
+			return errPlannerStreamDone
 		}
 		var chunk struct {
 			Choices []struct {
@@ -302,23 +324,23 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 			} `json:"choices"`
 		}
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
+			return nil
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.ReasoningContent != "" {
-				if err := emit(PlanStreamEvent{Type: "thinking", Text: choice.Delta.ReasoningContent}); err != nil {
-					return message, err
+				if err := emitPlanStreamEvent(emit, PlanStreamEvent{Type: "thinking", Text: choice.Delta.ReasoningContent}); err != nil {
+					return err
 				}
 			}
 			if choice.Delta.Reasoning != "" {
-				if err := emit(PlanStreamEvent{Type: "thinking", Text: choice.Delta.Reasoning}); err != nil {
-					return message, err
+				if err := emitPlanStreamEvent(emit, PlanStreamEvent{Type: "thinking", Text: choice.Delta.Reasoning}); err != nil {
+					return err
 				}
 			}
 			if choice.Delta.Content != "" {
 				message.Content = appendChatMessageContent(message.Content, choice.Delta.Content)
-				if err := emit(PlanStreamEvent{Type: "content", Text: choice.Delta.Content}); err != nil {
-					return message, err
+				if err := emitPlanStreamEvent(emit, PlanStreamEvent{Type: "content", Text: choice.Delta.Content}); err != nil {
+					return err
 				}
 			}
 			for _, deltaCall := range choice.Delta.ToolCalls {
@@ -329,8 +351,8 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 				}
 				if !toolStarted {
 					toolStarted = true
-					if err := emit(PlanStreamEvent{Type: "tool", Text: ""}); err != nil {
-						return message, err
+					if err := emitPlanStreamEvent(emit, PlanStreamEvent{Type: "tool", Text: ""}); err != nil {
+						return err
 					}
 				}
 				if deltaCall.ID != "" {
@@ -344,14 +366,18 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 				}
 				if deltaCall.Function.Arguments != "" {
 					call.Function.Arguments += deltaCall.Function.Arguments
-					if err := emit(PlanStreamEvent{Type: "tool", Text: deltaCall.Function.Arguments}); err != nil {
-						return message, err
+					if err := emitPlanStreamEvent(emit, PlanStreamEvent{Type: "tool", Text: deltaCall.Function.Arguments}); err != nil {
+						return err
 					}
 				}
 			}
 		}
+		return nil
+	})
+	if errors.Is(err, errPlannerStreamDone) {
+		err = nil
 	}
-	if err := scanner.Err(); err != nil {
+	if err != nil {
 		return message, err
 	}
 	for i := 0; i < len(toolByIndex); i++ {
@@ -359,7 +385,103 @@ func (p *Planner) doChatStream(ctx context.Context, reqBody chatRequest, emit fu
 			message.ToolCalls = append(message.ToolCalls, *call)
 		}
 	}
+	if !sawDone {
+		return message, io.ErrUnexpectedEOF
+	}
 	return message, nil
+}
+
+func (p *Planner) streamHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = plannerRequestTimeout(p.cfg.TimeoutSeconds)
+	return &http.Client{Transport: transport}
+}
+
+func plannerRequestTimeout(seconds int) time.Duration {
+	if seconds <= 0 {
+		return 45 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func plannerStreamIdleTimeout(seconds int) time.Duration {
+	timeout := plannerRequestTimeout(seconds)
+	if timeout < 30*time.Second {
+		return 30 * time.Second
+	}
+	return timeout
+}
+
+func emitPlanStreamEvent(emit func(PlanStreamEvent) error, event PlanStreamEvent) error {
+	if err := emit(event); err != nil {
+		return plannerEmitError{err: err}
+	}
+	return nil
+}
+
+func readSSEPayloads(ctx context.Context, body io.Reader, idleTimeout time.Duration, handle func(string) error) error {
+	reader := bufio.NewReaderSize(body, 64*1024)
+	var dataLines []string
+	flush := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		payload := strings.Join(dataLines, "\n")
+		dataLines = dataLines[:0]
+		if strings.TrimSpace(payload) == "" {
+			return nil
+		}
+		return handle(payload)
+	}
+	for {
+		line, err := readLineWithIdle(ctx, reader, idleTimeout)
+		if line != "" {
+			line = strings.TrimRight(line, "\n")
+			line = strings.TrimRight(line, "\r")
+			switch {
+			case line == "":
+				if flushErr := flush(); flushErr != nil {
+					return flushErr
+				}
+			case strings.HasPrefix(line, ":"):
+				continue
+			case strings.HasPrefix(line, "data:"):
+				value := strings.TrimPrefix(line, "data:")
+				if strings.HasPrefix(value, " ") {
+					value = value[1:]
+				}
+				dataLines = append(dataLines, value)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return flush()
+			}
+			return err
+		}
+	}
+}
+
+func readLineWithIdle(ctx context.Context, reader *bufio.Reader, idleTimeout time.Duration) (string, error) {
+	type readResult struct {
+		line string
+		err  error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		resultCh <- readResult{line: line, err: err}
+	}()
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result.line, result.err
+	case <-timer.C:
+		return "", errPlannerStreamIdleTimeout
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 func planFromMessage(msg chatMessage, input PlanInput) GenerationPlan {
