@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -61,6 +62,21 @@ type Asset struct {
 	ContentHash string    `json:"content_hash"`
 	CreatedAt   time.Time `json:"created_at"`
 	LastUsedAt  string    `json:"last_used_at,omitempty"`
+}
+
+type Capsule struct {
+	ID                 int64     `json:"id"`
+	TenantID           int64     `json:"tenant_id"`
+	UserID             int64     `json:"user_id"`
+	CapsuleID          string    `json:"capsule_id"`
+	Title              string    `json:"title"`
+	Type               string    `json:"type"`
+	Tags               []string  `json:"tags"`
+	PreviewURL         string    `json:"preview_url"`
+	PlannerInstruction string    `json:"planner_instruction"`
+	DirectInstruction  string    `json:"direct_instruction"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 type Message struct {
@@ -203,6 +219,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			last_used_at text not null default '',
 			created_at datetime not null default current_timestamp
 		)`,
+		`create table if not exists capsules (
+			id integer primary key autoincrement,
+			tenant_id integer not null references tenants(id) on delete cascade,
+			user_id integer not null references users(id) on delete cascade,
+			capsule_id text not null,
+			title text not null,
+			type text not null default '',
+			tags text not null default '[]',
+			preview_url text not null default '',
+			planner_instruction text not null default '',
+			direct_instruction text not null default '',
+			created_at datetime not null default current_timestamp,
+			updated_at datetime not null default current_timestamp,
+			unique(tenant_id, capsule_id)
+		)`,
 		`create table if not exists messages (
 			id integer primary key autoincrement,
 			tenant_id integer not null references tenants(id) on delete cascade,
@@ -280,6 +311,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "assets", "last_used_at", "text not null default ''"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `create unique index if not exists idx_capsules_tenant_capsule_id on capsules(tenant_id, capsule_id)`); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "users", "avatar_url", "text not null default ''"); err != nil {
@@ -785,6 +819,115 @@ func (s *Store) DeleteAsset(ctx context.Context, user User, id int64) error {
 	return nil
 }
 
+func (s *Store) ListCapsules(ctx context.Context, user User, query string) ([]Capsule, error) {
+	query = strings.TrimSpace(query)
+	sqlText := capsuleSelectSQL() + ` where tenant_id = ?`
+	args := []any{user.TenantID}
+	if query != "" {
+		like := "%" + query + "%"
+		sqlText += ` and (capsule_id like ? or title like ? or type like ? or tags like ?)`
+		args = append(args, like, like, like, like)
+	}
+	sqlText += ` order by type, capsule_id`
+	rows, err := s.db.QueryContext(ctx, sqlText, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCapsules(rows)
+}
+
+func (s *Store) GetCapsule(ctx context.Context, user User, id int64) (Capsule, error) {
+	item, err := scanCapsule(s.db.QueryRowContext(ctx, capsuleSelectSQL()+` where id = ? and tenant_id = ?`, id, user.TenantID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Capsule{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) GetCapsuleByCapsuleID(ctx context.Context, user User, capsuleID string) (Capsule, error) {
+	item, err := scanCapsule(s.db.QueryRowContext(ctx, capsuleSelectSQL()+` where capsule_id = ? and tenant_id = ?`, capsuleID, user.TenantID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Capsule{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) ListCapsulesByCapsuleIDs(ctx context.Context, user User, capsuleIDs []string) ([]Capsule, error) {
+	var items []Capsule
+	seen := map[string]bool{}
+	for _, capsuleID := range capsuleIDs {
+		capsuleID = strings.TrimSpace(capsuleID)
+		if capsuleID == "" || seen[capsuleID] {
+			continue
+		}
+		seen[capsuleID] = true
+		item, err := s.GetCapsuleByCapsuleID(ctx, user, capsuleID)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (s *Store) CreateCapsule(ctx context.Context, user User, item Capsule) (Capsule, error) {
+	tags, err := encodeCapsuleTags(item.Tags)
+	if err != nil {
+		return Capsule{}, err
+	}
+	res, err := s.db.ExecContext(ctx, `insert into capsules
+		(tenant_id, user_id, capsule_id, title, type, tags, preview_url, planner_instruction, direct_instruction)
+		values (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		user.TenantID, user.ID, item.CapsuleID, item.Title, item.Type, tags, item.PreviewURL, item.PlannerInstruction, item.DirectInstruction)
+	if err != nil {
+		return Capsule{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Capsule{}, err
+	}
+	return s.GetCapsule(ctx, user, id)
+}
+
+func (s *Store) UpdateCapsule(ctx context.Context, user User, id int64, item Capsule) (Capsule, error) {
+	tags, err := encodeCapsuleTags(item.Tags)
+	if err != nil {
+		return Capsule{}, err
+	}
+	res, err := s.db.ExecContext(ctx, `update capsules set
+		capsule_id = ?, title = ?, type = ?, tags = ?, preview_url = ?,
+		planner_instruction = ?, direct_instruction = ?, updated_at = current_timestamp
+		where id = ? and tenant_id = ?`,
+		item.CapsuleID, item.Title, item.Type, tags, item.PreviewURL, item.PlannerInstruction, item.DirectInstruction, id, user.TenantID)
+	if err != nil {
+		return Capsule{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return Capsule{}, err
+	}
+	if affected == 0 {
+		return Capsule{}, ErrNotFound
+	}
+	return s.GetCapsule(ctx, user, id)
+}
+
+func (s *Store) DeleteCapsule(ctx context.Context, user User, id int64) error {
+	res, err := s.db.ExecContext(ctx, `delete from capsules where id = ? and tenant_id = ?`, id, user.TenantID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) AddMessage(ctx context.Context, user User, sessionID int64, role, content, prompt, taskID string) (Message, error) {
 	if _, err := s.GetSession(ctx, user, sessionID); err != nil {
 		return Message{}, err
@@ -1225,6 +1368,69 @@ func scanAssets(rows *sql.Rows) ([]Asset, error) {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func capsuleSelectSQL() string {
+	return `select id, tenant_id, user_id, capsule_id, title, type, tags, preview_url, planner_instruction, direct_instruction, created_at, updated_at from capsules`
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCapsule(scanner rowScanner) (Capsule, error) {
+	var item Capsule
+	var tags string
+	err := scanner.Scan(&item.ID, &item.TenantID, &item.UserID, &item.CapsuleID, &item.Title, &item.Type, &tags, &item.PreviewURL, &item.PlannerInstruction, &item.DirectInstruction, &item.CreatedAt, &item.UpdatedAt)
+	if err != nil {
+		return Capsule{}, err
+	}
+	item.Tags = decodeCapsuleTags(tags)
+	return item, nil
+}
+
+func scanCapsules(rows *sql.Rows) ([]Capsule, error) {
+	var items []Capsule
+	for rows.Next() {
+		item, err := scanCapsule(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func encodeCapsuleTags(tags []string) (string, error) {
+	clean := make([]string, 0, len(tags))
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		clean = append(clean, tag)
+	}
+	data, err := json.Marshal(clean)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodeCapsuleTags(value string) []string {
+	var tags []string
+	if err := json.Unmarshal([]byte(value), &tags); err != nil {
+		return nil
+	}
+	clean := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			clean = append(clean, tag)
+		}
+	}
+	return clean
 }
 
 func scanLedger(rows *sql.Rows) ([]CreditLedger, error) {

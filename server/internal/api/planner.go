@@ -24,7 +24,17 @@ type PlanInput struct {
 	Resolution      string
 	Quality         string
 	Count           int
+	Capsules        []PlanCapsule
 	ContextMessages []store.Message
+}
+
+type PlanCapsule struct {
+	CapsuleID          string
+	Title              string
+	Type               string
+	Tags               []string
+	PlannerInstruction string
+	DirectInstruction  string
 }
 
 type GenerationPlan struct {
@@ -135,7 +145,7 @@ func (p *Planner) Plan(ctx context.Context, input PlanInput) (GenerationPlan, er
 	}
 
 	messages := []chatMessage{
-		{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision)},
+		{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision, input)},
 	}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
@@ -173,7 +183,7 @@ func (p *Planner) PlanStream(ctx context.Context, input PlanInput, emit func(Pla
 		return plan, nil
 	}
 
-	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision)}}
+	messages := []chatMessage{{Role: "system", Content: plannerSystemPrompt(p.cfg.PlannerSystemPrompt, p.cfg.SupportsVision, input)}}
 	for _, msg := range trimContext(input.ContextMessages, p.cfg.MaxContextMessages) {
 		content := msg.Content
 		if msg.Prompt != "" {
@@ -541,6 +551,10 @@ func BuildPlan(input PlanInput) GenerationPlan {
 	input = normalizeInput(input)
 	var b strings.Builder
 	b.WriteString("Generate an image prompt as a clear visual brief.\n")
+	if section := plannerCapsulesText(input.Capsules); section != "" {
+		b.WriteString(section)
+		b.WriteString("\n")
+	}
 	if len(input.ImageNames) > 0 {
 		b.WriteString("Reference images are provided in order: ")
 		b.WriteString(strings.Join(input.ImageNames, ", "))
@@ -562,8 +576,12 @@ func BuildPlan(input PlanInput) GenerationPlan {
 
 func DirectPlan(input PlanInput) GenerationPlan {
 	input = normalizeInput(input)
+	prompt := strings.TrimSpace(input.UserText)
+	if section := directCapsulesText(input.Capsules); section != "" {
+		prompt = strings.TrimSpace(prompt + "\n\n" + section)
+	}
 	return GenerationPlan{
-		Prompt:           strings.TrimSpace(input.UserText),
+		Prompt:           prompt,
 		Size:             input.Size,
 		Resolution:       input.Resolution,
 		Quality:          input.Quality,
@@ -641,6 +659,56 @@ func sanitizePlan(plan GenerationPlan, input PlanInput) GenerationPlan {
 	return plan
 }
 
+func plannerCapsulesText(capsules []PlanCapsule) string {
+	if len(capsules) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, capsule := range capsules {
+		instruction := strings.TrimSpace(capsule.PlannerInstruction)
+		if instruction == "" {
+			instruction = strings.TrimSpace(capsule.DirectInstruction)
+		}
+		if instruction == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- @%s", capsule.CapsuleID))
+		if strings.TrimSpace(capsule.Title) != "" {
+			b.WriteString(fmt.Sprintf(" (%s)", strings.TrimSpace(capsule.Title)))
+		}
+		if strings.TrimSpace(capsule.Type) != "" {
+			b.WriteString(fmt.Sprintf(", type: %s", strings.TrimSpace(capsule.Type)))
+		}
+		if len(capsule.Tags) > 0 {
+			b.WriteString(fmt.Sprintf(", tags: %s", strings.Join(capsule.Tags, ", ")))
+		}
+		b.WriteString("\n  Instruction: ")
+		b.WriteString(instruction)
+		b.WriteString("\n")
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func directCapsulesText(capsules []PlanCapsule) string {
+	if len(capsules) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, capsule := range capsules {
+		instruction := strings.TrimSpace(capsule.DirectInstruction)
+		if instruction == "" {
+			instruction = strings.TrimSpace(capsule.PlannerInstruction)
+		}
+		if instruction != "" {
+			parts = append(parts, instruction)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Attached capsule instructions:\n" + strings.Join(parts, "\n")
+}
+
 func defaultPlannerSystemPrompt() string {
 	var b strings.Builder
 	b.WriteString(`You are PicTu's Planner. Your job is to turn the user's message into a strong image generation or image editing brief, then call generate_image when the user is ready.
@@ -656,6 +724,12 @@ Core behavior:
 - If there is text in the image, quote the exact text and state its approximate position and visual treatment. Also avoid adding text when none was requested.
 - Do not invent brand names, logos, identities, faces, UI copy, labels, or copyrighted characters unless the user requested them or they are visible in a reference image.
 - Keep safety-neutral visual details rich: subject, action/state, environment, time of day, lighting, material, mood, composition, lens/camera angle, color palette, and intended use.
+
+Capsules:
+- Attached capsules are reusable prompt assets selected by the user.
+- Treat capsule instructions as intentional requirements. Blend them into the final prompt naturally instead of copying them as a separate checklist.
+- If multiple capsules overlap, preserve the user's latest message and combine compatible capsule details. If there is a conflict, prefer the user's message and the most specific capsule.
+- Do not mention capsule IDs in the final prompt unless the user explicitly asks for the asset name.
 
 Final prompt shape:
 Generate/Edit [image type] of [subject] [action/state],
@@ -677,11 +751,12 @@ Tool and parameter rules:
 	return b.String()
 }
 
-func plannerSystemPrompt(customPrompt string, canSeeImages bool) string {
+func plannerSystemPrompt(customPrompt string, canSeeImages bool, input PlanInput) string {
 	base := strings.TrimSpace(customPrompt)
 	if base == "" {
 		base = defaultPlannerSystemPrompt()
 	}
+	base = renderPlannerPromptTemplate(base, input)
 	var b strings.Builder
 	b.WriteString(base)
 	b.WriteString("\n\nRuntime capability:\n")
@@ -691,6 +766,31 @@ func plannerSystemPrompt(customPrompt string, canSeeImages bool) string {
 		b.WriteString("- You cannot see pixels in uploaded images. You only know image order, file names, and what the user says about them.\n")
 	}
 	return b.String()
+}
+
+func renderPlannerPromptTemplate(prompt string, input PlanInput) string {
+	if !strings.Contains(prompt, "{{") {
+		return prompt
+	}
+	replacements := map[string]string{
+		"{{capsules}}":         plannerPromptCapsulesBlock(input.Capsules),
+		"{{user_message}}":     strings.TrimSpace(input.UserText),
+		"{{current_settings}}": fmt.Sprintf("size: %s\nresolution: %s\nquality: %s\ncount: %d", input.Size, input.Resolution, input.Quality, input.Count),
+		"{{reference_images}}": strings.Join(input.ImageNames, "\n"),
+	}
+	out := prompt
+	for tag, value := range replacements {
+		out = strings.ReplaceAll(out, tag, value)
+	}
+	return out
+}
+
+func plannerPromptCapsulesBlock(capsules []PlanCapsule) string {
+	text := plannerCapsulesText(capsules)
+	if text == "" {
+		return "No capsules are attached."
+	}
+	return text
 }
 
 func userPlanningPrompt(input PlanInput) string {
@@ -707,6 +807,11 @@ func userPlanningPrompt(input PlanInput) string {
 		for i, name := range input.ImageNames {
 			b.WriteString(fmt.Sprintf("- image %d: %s\n", i+1, name))
 		}
+	}
+	if section := plannerCapsulesText(input.Capsules); section != "" {
+		b.WriteString("ATTACHED CAPSULES:\n")
+		b.WriteString(section)
+		b.WriteString("\n")
 	}
 	b.WriteString("USER MESSAGE:\n")
 	b.WriteString(input.UserText)

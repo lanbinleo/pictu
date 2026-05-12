@@ -88,6 +88,10 @@ func (s *Server) routes() *gin.Engine {
 	protected.POST("/sessions/:id/unarchive", s.unarchiveSession)
 	protected.DELETE("/sessions/:id", s.deleteSession)
 	protected.GET("/assets", s.listAssets)
+	protected.GET("/capsules", s.listCapsules)
+	protected.POST("/capsules", s.createCapsule)
+	protected.PUT("/capsules/:id", s.updateCapsule)
+	protected.DELETE("/capsules/:id", s.deleteCapsule)
 	protected.GET("/settings", s.runtimeOptions)
 	protected.POST("/sessions/:id/assets", s.uploadAsset)
 	protected.POST("/sessions/:id/assets/:asset_id/use", s.useAsset)
@@ -527,25 +531,87 @@ func (s *Server) deleteAsset(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+func (s *Server) listCapsules(c *gin.Context) {
+	items, err := s.store.ListCapsules(c, currentUser(c), c.Query("q"))
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"capsules": items})
+}
+
+func (s *Server) createCapsule(c *gin.Context) {
+	item, ok := bindCapsuleRequest(c)
+	if !ok {
+		return
+	}
+	capsule, err := s.store.CreateCapsule(c, currentUser(c), item)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			fail(c, http.StatusConflict, "capsule id already exists")
+			return
+		}
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"capsule": capsule})
+}
+
+func (s *Server) updateCapsule(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid capsule id")
+		return
+	}
+	item, ok := bindCapsuleRequest(c)
+	if !ok {
+		return
+	}
+	capsule, err := s.store.UpdateCapsule(c, currentUser(c), id, item)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			fail(c, http.StatusConflict, "capsule id already exists")
+			return
+		}
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"capsule": capsule})
+}
+
+func (s *Server) deleteCapsule(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		fail(c, http.StatusBadRequest, "invalid capsule id")
+		return
+	}
+	if err := s.store.DeleteCapsule(c, currentUser(c), id); err != nil {
+		statusFromErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (s *Server) generate(c *gin.Context) {
 	sessionID, ok := pathID(c)
 	if !ok {
 		return
 	}
 	var req struct {
-		Message          string  `json:"message" binding:"required"`
-		AssetIDs         []int64 `json:"asset_ids"`
-		Size             string  `json:"size"`
-		Resolution       string  `json:"resolution"`
-		Quality          string  `json:"quality"`
-		Count            int     `json:"count"`
-		Confirmed        bool    `json:"confirmed"`
-		Prompt           string  `json:"prompt"`
-		AssistantMessage string  `json:"assistant_message"`
-		UsePlanner       *bool   `json:"use_planner"`
-		PlannerProvider  string  `json:"planner_provider"`
-		PlannerModel     string  `json:"planner_model"`
-		ImageProvider    string  `json:"image_provider"`
+		Message          string   `json:"message" binding:"required"`
+		AssetIDs         []int64  `json:"asset_ids"`
+		CapsuleIDs       []string `json:"capsule_ids"`
+		Size             string   `json:"size"`
+		Resolution       string   `json:"resolution"`
+		Quality          string   `json:"quality"`
+		Count            int      `json:"count"`
+		Confirmed        bool     `json:"confirmed"`
+		Prompt           string   `json:"prompt"`
+		AssistantMessage string   `json:"assistant_message"`
+		UsePlanner       *bool    `json:"use_planner"`
+		PlannerProvider  string   `json:"planner_provider"`
+		PlannerModel     string   `json:"planner_model"`
+		ImageProvider    string   `json:"image_provider"`
 	}
 	if !bind(c, &req) {
 		return
@@ -561,6 +627,11 @@ func (s *Server) generate(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	capsules, err := s.capsulesByIDs(c, user, req.CapsuleIDs)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
 	_ = s.store.TouchAssetsUsed(c, user, req.AssetIDs)
 	var imageURLs []string
 	var imageNames []string
@@ -568,7 +639,7 @@ func (s *Server) generate(c *gin.Context) {
 		imageURLs = append(imageURLs, asset.URL)
 		imageNames = append(imageNames, fmt.Sprintf("image %d (%s)", i+1, asset.FileName))
 	}
-	userMessageContent := messageWithReferences(req.Message, assets)
+	userMessageContent := messageWithCapsules(messageWithReferences(req.Message, assets), capsules)
 	contextMessages, err := s.store.ListMessages(c, user, sessionID)
 	if err != nil {
 		statusFromErr(c, err)
@@ -582,6 +653,7 @@ func (s *Server) generate(c *gin.Context) {
 		Resolution:      req.Resolution,
 		Quality:         req.Quality,
 		Count:           req.Count,
+		Capsules:        planCapsules(capsules),
 		ContextMessages: contextMessages,
 	}
 	var plan GenerationPlan
@@ -707,16 +779,17 @@ func (s *Server) generateStream(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Message         string  `json:"message" binding:"required"`
-		AssetIDs        []int64 `json:"asset_ids"`
-		Size            string  `json:"size"`
-		Resolution      string  `json:"resolution"`
-		Quality         string  `json:"quality"`
-		Count           int     `json:"count"`
-		UsePlanner      *bool   `json:"use_planner"`
-		PlannerProvider string  `json:"planner_provider"`
-		PlannerModel    string  `json:"planner_model"`
-		ImageProvider   string  `json:"image_provider"`
+		Message         string   `json:"message" binding:"required"`
+		AssetIDs        []int64  `json:"asset_ids"`
+		CapsuleIDs      []string `json:"capsule_ids"`
+		Size            string   `json:"size"`
+		Resolution      string   `json:"resolution"`
+		Quality         string   `json:"quality"`
+		Count           int      `json:"count"`
+		UsePlanner      *bool    `json:"use_planner"`
+		PlannerProvider string   `json:"planner_provider"`
+		PlannerModel    string   `json:"planner_model"`
+		ImageProvider   string   `json:"image_provider"`
 	}
 	if !bind(c, &req) {
 		return
@@ -732,6 +805,11 @@ func (s *Server) generateStream(c *gin.Context) {
 		statusFromErr(c, err)
 		return
 	}
+	capsules, err := s.capsulesByIDs(c, user, req.CapsuleIDs)
+	if err != nil {
+		statusFromErr(c, err)
+		return
+	}
 	_ = s.store.TouchAssetsUsed(c, user, req.AssetIDs)
 	var imageURLs []string
 	var imageNames []string
@@ -739,7 +817,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		imageURLs = append(imageURLs, asset.URL)
 		imageNames = append(imageNames, fmt.Sprintf("image %d (%s)", i+1, asset.FileName))
 	}
-	userMessageContent := messageWithReferences(req.Message, assets)
+	userMessageContent := messageWithCapsules(messageWithReferences(req.Message, assets), capsules)
 	contextMessages, err := s.store.ListMessages(c, user, sessionID)
 	if err != nil {
 		statusFromErr(c, err)
@@ -753,6 +831,7 @@ func (s *Server) generateStream(c *gin.Context) {
 		Resolution:      req.Resolution,
 		Quality:         req.Quality,
 		Count:           req.Count,
+		Capsules:        planCapsules(capsules),
 		ContextMessages: contextMessages,
 	}
 
@@ -1107,6 +1186,23 @@ func (s *Server) assetsByID(ctx context.Context, user store.User, ids []int64) (
 	return assets, nil
 }
 
+func (s *Server) capsulesByIDs(ctx context.Context, user store.User, ids []string) ([]store.Capsule, error) {
+	clean := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = normalizeCapsuleID(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		clean = append(clean, id)
+	}
+	if len(clean) > 20 {
+		return nil, fmt.Errorf("at most 20 capsules are supported")
+	}
+	return s.store.ListCapsulesByCapsuleIDs(ctx, user, clean)
+}
+
 func (s *Server) maybeTitleSession(ctx context.Context, user store.User, sessionID int64, previous []store.Message, userText, assistantText string) {
 	if len(previous) > 0 {
 		return
@@ -1293,6 +1389,38 @@ func messageWithReferences(text string, assets []store.Asset) string {
 	return strings.TrimSpace(text) + "\n\n" + strings.Join(refs, " ")
 }
 
+func messageWithCapsules(text string, capsules []store.Capsule) string {
+	if len(capsules) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(text))
+	b.WriteString("\n\n胶囊：")
+	for i, capsule := range capsules {
+		if i > 0 {
+			b.WriteString("、")
+		}
+		b.WriteString("@")
+		b.WriteString(capsule.CapsuleID)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func planCapsules(capsules []store.Capsule) []PlanCapsule {
+	items := make([]PlanCapsule, 0, len(capsules))
+	for _, capsule := range capsules {
+		items = append(items, PlanCapsule{
+			CapsuleID:          capsule.CapsuleID,
+			Title:              capsule.Title,
+			Type:               capsule.Type,
+			Tags:               capsule.Tags,
+			PlannerInstruction: capsule.PlannerInstruction,
+			DirectInstruction:  capsule.DirectInstruction,
+		})
+	}
+	return items
+}
+
 func plannerReferenceURLs(assets []store.Asset) []string {
 	var urls []string
 	for _, asset := range assets {
@@ -1399,6 +1527,85 @@ func (s *Server) serveFrontend(r *gin.Engine) {
 func currentUser(c *gin.Context) store.User {
 	user, _ := c.Get("user")
 	return user.(store.User)
+}
+
+func bindCapsuleRequest(c *gin.Context) (store.Capsule, bool) {
+	var req struct {
+		CapsuleID          string   `json:"capsule_id" binding:"required"`
+		Title              string   `json:"title" binding:"required"`
+		Type               string   `json:"type"`
+		Tags               []string `json:"tags"`
+		PreviewURL         string   `json:"preview_url"`
+		PlannerInstruction string   `json:"planner_instruction"`
+		DirectInstruction  string   `json:"direct_instruction"`
+	}
+	if !bind(c, &req) {
+		return store.Capsule{}, false
+	}
+	capsuleID := normalizeCapsuleID(req.CapsuleID)
+	if !validCapsuleID(capsuleID) {
+		fail(c, http.StatusBadRequest, "capsule id may contain lowercase letters, numbers, slash, dash, and underscore")
+		return store.Capsule{}, false
+	}
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		fail(c, http.StatusBadRequest, "title is required")
+		return store.Capsule{}, false
+	}
+	item := store.Capsule{
+		CapsuleID:          capsuleID,
+		Title:              title,
+		Type:               normalizeCapsuleID(req.Type),
+		Tags:               cleanStringList(req.Tags),
+		PreviewURL:         strings.TrimSpace(req.PreviewURL),
+		PlannerInstruction: strings.TrimSpace(req.PlannerInstruction),
+		DirectInstruction:  strings.TrimSpace(req.DirectInstruction),
+	}
+	return item, true
+}
+
+func normalizeCapsuleID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = strings.ReplaceAll(value, " ", "-")
+	for strings.Contains(value, "//") {
+		value = strings.ReplaceAll(value, "//", "/")
+	}
+	value = strings.Trim(value, "/")
+	return value
+}
+
+func validCapsuleID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			continue
+		}
+		if r == '/' || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func cleanStringList(values []string) []string {
+	clean := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		clean = append(clean, value)
+	}
+	return clean
 }
 
 func bind(c *gin.Context, out any) bool {

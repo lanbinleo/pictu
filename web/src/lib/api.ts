@@ -1,9 +1,19 @@
 import { useAppStore } from '../store/appStore'
-import type { AdminLedgerEntry, AdminStats, Asset, GenerateResponse, RuntimeLLMModel, RuntimeLLMProvider, RuntimeSettings, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
+import type { AdminLedgerEntry, AdminStats, Asset, Capsule, GenerateResponse, RuntimeLLMModel, RuntimeLLMProvider, RuntimeSettings, Session, SessionDetail, StreamEvent, Task, UsageResponse, User } from '../types/api'
 
 type AuthResponse = {
   token: string
   user: User
+}
+
+export type CapsulePayload = {
+  capsule_id: string
+  title: string
+  type: string
+  tags: string[]
+  preview_url: string
+  planner_instruction: string
+  direct_instruction: string
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -51,6 +61,12 @@ export const api = {
   deleteSession: (id: number) => request<{ ok: true }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   getSession: (id: number) => request<SessionDetail>(`/api/sessions/${id}`),
   listAssets: () => request<{ assets: Asset[] | null }>('/api/assets'),
+  listCapsules: (query = '') => request<{ capsules: Capsule[] | null }>(`/api/capsules${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`),
+  createCapsule: (payload: CapsulePayload) =>
+    request<{ capsule: Capsule }>('/api/capsules', { method: 'POST', body: JSON.stringify(payload) }),
+  updateCapsule: (id: number, payload: CapsulePayload) =>
+    request<{ capsule: Capsule }>(`/api/capsules/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteCapsule: (id: number) => request<{ ok: true }>(`/api/capsules/${id}`, { method: 'DELETE' }),
   runtimeSettings: () => request<{ settings: RuntimeSettings }>('/api/settings'),
   uploadAsset: (sessionId: number, file: File, provider?: string) => {
     const data = new FormData()
@@ -66,6 +82,7 @@ export const api = {
     payload: {
       message: string
       asset_ids: number[]
+      capsule_ids?: string[]
       size: string
       resolution: string
       quality: string
@@ -88,6 +105,7 @@ export const api = {
     payload: {
       message: string
       asset_ids: number[]
+      capsule_ids?: string[]
       size: string
       resolution: string
       quality: string

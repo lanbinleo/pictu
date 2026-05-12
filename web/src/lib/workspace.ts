@@ -12,6 +12,7 @@ export type PendingRequest = {
   response: GenerateResponse
   message: string
   assetIds: number[]
+  capsuleIds: string[]
   settings: GenerationSettingsValue
 }
 

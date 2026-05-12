@@ -24,7 +24,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '../lib/api'
-import type { Asset, GenerationPlan, Message, RuntimeSettings, Session, Task, UsageBucket } from '../types/api'
+import type { Asset, Capsule, GenerationPlan, Message, RuntimeSettings, Session, Task, UsageBucket } from '../types/api'
 import { localizeQuality, localizeReason, localizeStatus, translate, type Locale } from '../i18n'
 import { useAppStore } from '../store/appStore'
 import {
@@ -267,14 +267,28 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   const [countMenuOpen, setCountMenuOpen] = useState(false)
   const [libraryAssets, setLibraryAssets] = useState<Asset[]>([])
   const [libraryLoading, setLibraryLoading] = useState(false)
+  const [capsules, setCapsules] = useState<Capsule[]>([])
+  const [selectedCapsules, setSelectedCapsules] = useState<Capsule[]>([])
+  const [capsuleLookupOpen, setCapsuleLookupOpen] = useState(false)
+  const [capsuleLookupQuery, setCapsuleLookupQuery] = useState('')
+  const [capsuleLookupStart, setCapsuleLookupStart] = useState(0)
+  const [capsuleActiveIndex, setCapsuleActiveIndex] = useState(0)
   const [galleryPreview, setGalleryPreview] = useState<string | null>(null)
   const [mobileToolsOpen, setMobileToolsOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const editorRef = useRef<HTMLDivElement | null>(null)
   const actionsRef = useRef<HTMLDivElement | null>(null)
   const visibleAssets = useMemo(() => uniqueAssets(assets), [assets])
   const galleryAssets = useMemo(() => uniqueAssets([...visibleAssets, ...libraryAssets]), [visibleAssets, libraryAssets])
   const selectedAssets = useMemo(() => assetsInSelectionOrder(selectedAssetIds, [...assets, ...libraryAssets]), [selectedAssetIds, assets, libraryAssets])
+  const capsuleMatches = useMemo(() => {
+    const q = capsuleLookupQuery.trim().toLowerCase()
+    const selected = new Set(selectedCapsules.map((item) => item.capsule_id))
+    return capsules
+      .filter((item) => !selected.has(item.capsule_id))
+      .filter((item) => !q || [item.capsule_id, item.title, item.type, item.tags.join(' ')].some((value) => value.toLowerCase().includes(q)))
+      .slice(0, 8)
+  }, [capsules, capsuleLookupQuery, selectedCapsules])
   const composerCentered = !conversationStarted
   const greeting = useMemo(() => buildComposerGreeting(user), [user?.display_name, user?.email])
   const selectedPlannerProvider = plannerProvider || runtimeSettings?.defaults.planner_provider || ''
@@ -324,6 +338,92 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
     }
   }
 
+  async function loadCapsules() {
+    try {
+      const res = await api.listCapsules()
+      setCapsules(res.capsules ?? [])
+    } catch {
+      setCapsules([])
+    }
+  }
+
+  useEffect(() => {
+    loadCapsules()
+  }, [])
+
+  function editorText() {
+    return editorRef.current?.textContent ?? ''
+  }
+
+  function editorCaretOffset() {
+    const editor = editorRef.current
+    const selection = window.getSelection()
+    if (!editor || !selection || selection.rangeCount === 0) return editorText().length
+    const range = selection.getRangeAt(0)
+    if (!editor.contains(range.startContainer)) return editorText().length
+    const before = range.cloneRange()
+    before.selectNodeContents(editor)
+    before.setEnd(range.startContainer, range.startOffset)
+    return before.toString().length
+  }
+
+  function setEditorText(value: string, caretOffset = value.length) {
+    const editor = editorRef.current
+    if (!editor) return
+    editor.textContent = value
+    const textNode = editor.firstChild
+    const range = document.createRange()
+    const selection = window.getSelection()
+    if (!selection) return
+    const offset = Math.max(0, Math.min(caretOffset, value.length))
+    if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+      range.setStart(textNode, offset)
+    } else {
+      range.setStart(editor, 0)
+    }
+    range.collapse(true)
+    selection.removeAllRanges()
+    selection.addRange(range)
+  }
+
+  function updateCapsuleLookup(text: string, caretOffset: number) {
+    const before = text.slice(0, caretOffset)
+    const match = before.match(/(?:^|\s)@([a-zA-Z0-9/_-]*)$/)
+    if (!match) {
+      setCapsuleLookupOpen(false)
+      return
+    }
+    const query = match[1] ?? ''
+    setCapsuleLookupStart(caretOffset - query.length - 1)
+    setCapsuleLookupQuery(query)
+    setCapsuleActiveIndex(0)
+    setCapsuleLookupOpen(true)
+  }
+
+  function handleEditorInput() {
+    const text = editorText()
+    setDraft(text)
+    updateCapsuleLookup(text, editorCaretOffset())
+  }
+
+  function chooseCapsule(capsule: Capsule) {
+    if (selectedCapsules.some((item) => item.capsule_id === capsule.capsule_id)) return
+    const text = editorText()
+    const caret = editorCaretOffset()
+    const nextText = (text.slice(0, capsuleLookupStart) + text.slice(caret)).replace(/[ \t]{2,}/g, ' ')
+    setSelectedCapsules((items) => [...items, capsule])
+    setDraft(nextText)
+    setCapsuleLookupOpen(false)
+    window.setTimeout(() => {
+      editorRef.current?.focus()
+      setEditorText(nextText, capsuleLookupStart)
+    }, 0)
+  }
+
+  function removeCapsule(capsuleID: string) {
+    setSelectedCapsules((items) => items.filter((item) => item.capsule_id !== capsuleID))
+  }
+
   function openAssetGallery() {
     setAssetGalleryOpen((o) => !o)
     setSettingsOpen(false)
@@ -366,14 +466,16 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   }
 
   useEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`
+    const editor = editorRef.current
+    if (!editor) return
+    const current = editor.textContent ?? ''
+    if (current !== draft && (draft === '' || document.activeElement !== editor)) {
+      editor.textContent = draft
+    }
   }, [draft])
 
   useEffect(() => {
-    if (!settingsOpen && !assetGalleryOpen && !plannerProviderOpen && !imageProviderOpen && !countMenuOpen) return
+    if (!settingsOpen && !assetGalleryOpen && !plannerProviderOpen && !imageProviderOpen && !countMenuOpen && !capsuleLookupOpen) return
     if (galleryPreview) return
     function handleClick(event: MouseEvent) {
       if (actionsRef.current && !actionsRef.current.contains(event.target as Node)) {
@@ -382,11 +484,12 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
         setPlannerProviderOpen(false)
         setImageProviderOpen(false)
         setCountMenuOpen(false)
+        setCapsuleLookupOpen(false)
       }
     }
     document.addEventListener('mousedown', handleClick)
     return () => document.removeEventListener('mousedown', handleClick)
-  }, [settingsOpen, assetGalleryOpen, plannerProviderOpen, imageProviderOpen, countMenuOpen, galleryPreview])
+  }, [settingsOpen, assetGalleryOpen, plannerProviderOpen, imageProviderOpen, countMenuOpen, capsuleLookupOpen, galleryPreview])
 
   async function ensureTargetSession() {
     if (sessionId) return sessionId
@@ -400,7 +503,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
   }
 
   async function requestGenerate(
-    targetSessionId: number, message: string, assetIds: number[], baseSettings: typeof settings,
+    targetSessionId: number, message: string, assetIds: number[], capsuleIds: string[], baseSettings: typeof settings,
     extra?: Partial<typeof settings> & { confirmed?: boolean; prompt?: string; assistant_message?: string },
   ) {
     if (!message.trim()) return
@@ -413,15 +516,15 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
         setToolDraft({ sessionId: targetSessionId, phase: 'calling', prompt: extra.prompt, raw: '' })
       }
       const res = await api.generate(targetSessionId, {
-        message, asset_ids: assetIds, use_planner: usePlanner,
+        message, asset_ids: assetIds, capsule_ids: capsuleIds, use_planner: usePlanner,
         planner_provider: selectedPlannerProvider, planner_model: selectedPlannerModel, image_provider: selectedImageProvider,
         ...normalizedBaseSettings, ...extra,
       })
       if (res.requires_confirmation) {
-        setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, settings: normalizedBaseSettings })
+        setPendingRequest({ sessionId: targetSessionId, response: res, message, assetIds, capsuleIds, settings: normalizedBaseSettings })
         return
       }
-      if (res.generated || res.message) { setDraft(''); clearSelectedAssets() }
+      if (res.generated || res.message) { setDraft(''); clearSelectedAssets(); setSelectedCapsules([]) }
       await onChanged()
       setToolDraft(null)
     } catch (err) {
@@ -447,21 +550,25 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
       const { cleanText, overrides } = parseCommands(draft)
       const submitted = cleanText.trim() || draft.trim()
       const submittedAssetIds = [...selectedAssetIds]
+      const submittedCapsules = [...selectedCapsules]
+      const submittedCapsuleIds = submittedCapsules.map((item) => item.capsule_id)
       const submittedSettings = normalizeGenerationSettings({ ...settings, ...overrides })
       const submittedAssets = assetsInSelectionOrder(submittedAssetIds, [...assets, ...libraryAssets])
+      const capsuleLine = submittedCapsules.length > 0 ? `\n\n胶囊：${submittedCapsules.map((item) => `@${item.capsule_id}`).join('、')}` : ''
       const now = new Date().toISOString()
       setOptimisticMessages((items) => ({
         ...items,
-        [targetSessionId]: [{ id: -Date.now(), session_id: targetSessionId, role: 'user', content: withReferenceMarkdown(submitted, submittedAssets), created_at: now }],
+        [targetSessionId]: [{ id: -Date.now(), session_id: targetSessionId, role: 'user', content: withReferenceMarkdown(submitted + capsuleLine, submittedAssets), created_at: now }],
       }))
       setDraft('')
       clearSelectedAssets()
+      setSelectedCapsules([])
       setStreamingSessionId(targetSessionId)
       setStreamingText('')
       setThinkingText('')
       setToolDraft(null)
       await api.generateStream(targetSessionId, {
-        message: submitted, asset_ids: submittedAssetIds, use_planner: usePlanner,
+        message: submitted, asset_ids: submittedAssetIds, capsule_ids: submittedCapsuleIds, use_planner: usePlanner,
         planner_provider: selectedPlannerProvider, planner_model: selectedPlannerModel, image_provider: selectedImageProvider,
         ...submittedSettings,
       }, (event) => {
@@ -469,7 +576,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
         else if (event.type === 'thinking') setThinkingText((t) => t + event.text)
         else if (event.type === 'confirm') {
           keepStream = true; toolUsed = true
-          setPendingRequest({ sessionId: targetSessionId, response: event, message: submitted, assetIds: submittedAssetIds, settings: submittedSettings })
+          setPendingRequest({ sessionId: targetSessionId, response: event, message: submitted, assetIds: submittedAssetIds, capsuleIds: submittedCapsuleIds, settings: submittedSettings })
         } else if (event.type === 'done') {
           completed = true
           if (event.plan?.tool_called) {
@@ -507,7 +614,7 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
 
   async function confirmWith(nextSettings: typeof settings, prompt: string) {
     if (!pendingRequest) return
-    await requestGenerate(pendingRequest.sessionId, pendingRequest.message, pendingRequest.assetIds, pendingRequest.settings, {
+    await requestGenerate(pendingRequest.sessionId, pendingRequest.message, pendingRequest.assetIds, pendingRequest.capsuleIds, pendingRequest.settings, {
       ...normalizeGenerationSettings(nextSettings), confirmed: true, prompt, assistant_message: pendingRequest.response.plan.assistant_message,
     })
     setPendingRequest(null)
@@ -607,18 +714,72 @@ export function Composer({ sessionId, assets, onChanged, onEnsureSession, setStr
         )}
         <div className="composer-box">
           <input ref={fileInputRef} className="hidden-file" type="file" accept="image/*" multiple onChange={(e) => { uploadFiles(e.target.files); e.currentTarget.value = '' }} />
-          <textarea
-            ref={textareaRef}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit() } }}
-            onPaste={(e) => {
-              const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith('image/'))
-              if (files.length > 0) { e.preventDefault(); uploadFiles(files) }
-            }}
-            placeholder="描述你想要的画面…"
-            rows={1}
-          />
+          <div className="rich-composer-input" onClick={() => editorRef.current?.focus()}>
+            {selectedCapsules.map((capsule) => (
+              <span key={capsule.capsule_id} className="capsule-token" contentEditable={false} title={capsule.title}>
+                @{capsule.capsule_id}
+                <button type="button" onClick={(event) => { event.stopPropagation(); removeCapsule(capsule.capsule_id) }} title="移除胶囊"><X size={12} /></button>
+              </span>
+            ))}
+            <div
+              ref={editorRef}
+              className="rich-composer-editor"
+              contentEditable
+              suppressContentEditableWarning
+              data-placeholder="描述你想要的画面，输入 @ 使用胶囊…"
+              onInput={handleEditorInput}
+              onKeyDown={(e) => {
+                if (capsuleLookupOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                  e.preventDefault()
+                  setCapsuleActiveIndex((index) => {
+                    const count = Math.max(capsuleMatches.length, 1)
+                    return e.key === 'ArrowDown' ? (index + 1) % count : (index - 1 + count) % count
+                  })
+                  return
+                }
+                if (capsuleLookupOpen && e.key === 'Enter' && capsuleMatches[capsuleActiveIndex]) {
+                  e.preventDefault()
+                  chooseCapsule(capsuleMatches[capsuleActiveIndex])
+                  return
+                }
+                if (e.key === 'Backspace' && !editorText() && selectedCapsules.length > 0) {
+                  e.preventDefault()
+                  setSelectedCapsules((items) => items.slice(0, -1))
+                  return
+                }
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  e.currentTarget.closest('form')?.requestSubmit()
+                }
+              }}
+              onKeyUp={() => updateCapsuleLookup(editorText(), editorCaretOffset())}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith('image/'))
+                if (files.length > 0) { e.preventDefault(); uploadFiles(files); return }
+                e.preventDefault()
+                const text = e.clipboardData.getData('text/plain')
+                document.execCommand('insertText', false, text)
+                handleEditorInput()
+              }}
+            />
+          </div>
+          {capsuleLookupOpen && (
+            <div className="capsule-lookup" onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}>
+              {capsuleMatches.length === 0 && <div className="capsule-lookup-empty">没有匹配的胶囊</div>}
+              {capsuleMatches.map((capsule, index) => (
+                <button
+                  key={capsule.id}
+                  type="button"
+                  className={index === capsuleActiveIndex ? 'active' : ''}
+                  onClick={() => chooseCapsule(capsule)}
+                >
+                  {capsule.preview_url ? <img src={capsule.preview_url} alt="" /> : <span>@</span>}
+                  <strong>{capsule.title}</strong>
+                  <small>@{capsule.capsule_id}</small>
+                </button>
+              ))}
+            </div>
+          )}
           {hasCommandOverrides && (
             <div className="param-tags">
               {Object.entries(parsedCommands.overrides).map(([k, v]) => <span key={k} className="param-tag">{k}: {String(v)}</span>)}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Archive, Images, MessageSquarePlus, PanelLeft, PanelRight, Search, Sparkles } from 'lucide-react'
+import { Archive, Images, MessageSquarePlus, PackagePlus, PanelLeft, PanelRight, Search, Sparkles } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { api } from './lib/api'
 import { useAppStore } from './store/appStore'
@@ -9,6 +9,7 @@ import { ChatsPage } from './pages/ChatsPage'
 import { GalleryPage } from './pages/GalleryPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { AdminPage } from './pages/AdminPage'
+import { CapsulesPage } from './pages/CapsulesPage'
 import { Composer, EditableTitle, MessageStream, SessionDot, UserDock } from './components/workspace'
 import { NEW_CONVERSATION_DRAFT_PREFIX, type NewConversationDraft, type PendingRequest, type ToolDraft } from './lib/workspace'
 
@@ -53,9 +54,10 @@ export function Workspace() {
   const isWorkspaceRoute = isNewRoute || isChatRoute
   const isSearchRoute = routePath === '/search'
   const isGalleryRoute = routePath === '/gallery'
+  const isCapsulesRoute = routePath === '/capsules'
   const isSettingsRoute = routePath === '/settings'
   const isAdminRoute = routePath === '/admin'
-  const isKnownRoute = isWorkspaceRoute || isCanvasRoute || isSearchRoute || isGalleryRoute || isSettingsRoute || isAdminRoute
+  const isKnownRoute = isWorkspaceRoute || isCanvasRoute || isSearchRoute || isGalleryRoute || isCapsulesRoute || isSettingsRoute || isAdminRoute
 
   async function refreshSessions() {
     const res = await api.listSessions()
@@ -277,6 +279,9 @@ export function Workspace() {
           <button className={`nav-item ${isGalleryRoute ? 'active' : ''}`} onClick={() => navigate('/gallery')} title="画廊">
             <Images size={18} />{!leftCollapsed && <span>画廊</span>}
           </button>
+          <button className={`nav-item ${isCapsulesRoute ? 'active' : ''}`} onClick={() => navigate('/capsules')} title="胶囊">
+            <PackagePlus size={18} />{!leftCollapsed && <span>胶囊</span>}
+          </button>
         </nav>
 
         {!leftCollapsed && (
@@ -357,6 +362,7 @@ export function Workspace() {
         />
       )}
       {isGalleryRoute && <GalleryPage activeSessionId={activeSessionId} onSessionsChanged={refreshWorkspace} runtimeSettings={runtimeSettings} />}
+      {isCapsulesRoute && <CapsulesPage />}
       {isSearchRoute && <ChatsPage sessions={sessions} onSelect={selectSession} onArchive={archiveSession} onRefresh={refreshSessions} />}
       {isSettingsRoute && <SettingsPage />}
       {isAdminRoute && user?.role === 'admin' && <AdminPage />}

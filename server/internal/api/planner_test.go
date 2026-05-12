@@ -16,7 +16,7 @@ import (
 )
 
 func TestPlannerSystemPromptUsesCustomPrompt(t *testing.T) {
-	got := plannerSystemPrompt("Custom planner rules.", true)
+	got := plannerSystemPrompt("Custom planner rules.", true, PlanInput{})
 	if !strings.Contains(got, "Custom planner rules.") {
 		t.Fatalf("custom prompt missing from planner prompt: %q", got)
 	}
@@ -26,12 +26,43 @@ func TestPlannerSystemPromptUsesCustomPrompt(t *testing.T) {
 }
 
 func TestPlannerSystemPromptFallsBackToDefault(t *testing.T) {
-	got := plannerSystemPrompt("", false)
+	got := plannerSystemPrompt("", false, PlanInput{})
 	if !strings.Contains(got, "visual designer") {
 		t.Fatalf("default planner brief guidance missing: %q", got)
 	}
 	if !strings.Contains(got, "You cannot see pixels") {
 		t.Fatalf("non-vision capability note missing from planner prompt: %q", got)
+	}
+}
+
+func TestPlannerSystemPromptRendersCapsuleTemplate(t *testing.T) {
+	got := plannerSystemPrompt("Rules\n{{capsules}}\n{{user_message}}", false, PlanInput{
+		UserText: "draw a character",
+		Capsules: []PlanCapsule{{
+			CapsuleID:          "style/anime",
+			Title:              "日漫风格",
+			Type:               "style",
+			PlannerInstruction: "Use clean anime illustration details.",
+		}},
+	})
+	if !strings.Contains(got, "@style/anime") || !strings.Contains(got, "Use clean anime illustration details.") {
+		t.Fatalf("capsule template was not rendered: %q", got)
+	}
+	if !strings.Contains(got, "draw a character") {
+		t.Fatalf("user message template was not rendered: %q", got)
+	}
+}
+
+func TestDirectPlanIncludesCapsuleInstruction(t *testing.T) {
+	plan := DirectPlan(PlanInput{
+		UserText: "draw a character",
+		Capsules: []PlanCapsule{{
+			CapsuleID:         "style/cel-shading",
+			DirectInstruction: "crisp cel-shaded lighting",
+		}},
+	})
+	if !strings.Contains(plan.Prompt, "draw a character") || !strings.Contains(plan.Prompt, "crisp cel-shaded lighting") {
+		t.Fatalf("direct plan missing capsule instruction: %q", plan.Prompt)
 	}
 }
 

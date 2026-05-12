@@ -38,6 +38,21 @@ export type Asset = {
   last_used_at?: string
 }
 
+export type Capsule = {
+  id: number
+  tenant_id: number
+  user_id: number
+  capsule_id: string
+  title: string
+  type: string
+  tags: string[]
+  preview_url: string
+  planner_instruction: string
+  direct_instruction: string
+  created_at: string
+  updated_at: string
+}
+
 export type Message = {
   id: number
   session_id: number
